@@ -8,10 +8,8 @@ import {
   createUserWithEmailAndPassword,
   updateProfile,
   firebaseSignOut,
-  handleFirestoreError,
-  OperationType,
 } from '../firebase';
-import { doc, getDoc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { BLUEPRINT_LIMITS, sanitizeString, UserProfile } from '../types';
 import {
   ShieldCheck,
@@ -26,7 +24,6 @@ import {
   Mail,
   Lock,
   RefreshCw,
-  ExternalLink,
 } from 'lucide-react';
 
 interface AuthPortalProps {
@@ -40,9 +37,6 @@ interface PendingTwoFactorState {
   maskedEmail: string;
   purpose: 'signin' | 'signup' | 'google' | 'recover';
   needsEmailInput?: boolean;
-  previewUrl?: string | null;
-  fallbackCode?: string | null;
-  deliveredVia?: string;
 }
 
 export async function computeCredentialKey(username: string, password: string): Promise<string> {
@@ -53,19 +47,6 @@ export async function computeCredentialKey(username: string, password: string): 
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 40);
   return `${cleanUser.slice(0, 30)}_${hashHex}`;
-}
-
-export async function computeTwoFactorChallengeKey(
-  challengeId: string,
-  code: string
-): Promise<string> {
-  const cleanCode = code.trim();
-  const encoder = new TextEncoder();
-  const data = encoder.encode(`fundtracker_2fa_v1:${challengeId}:${cleanCode}`);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 44);
-  return `tfa_${challengeId}_${hashHex}`;
 }
 
 /**
@@ -105,20 +86,32 @@ export function maskEmailAddress(email: string): string {
   return `${visibleLocal}***@${domain}`.slice(0, 120);
 }
 
-function generateSixDigitCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  const num = 100000 + (array[0] % 900000);
-  return String(num);
-}
-
-function generateChallengeId(): string {
-  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  let out = '';
-  for (let i = 0; i < 12; i++) {
-    out += chars.charAt(Math.floor(Math.random() * chars.length));
+/**
+ * Links a verified email to the account (used for recovery and Google/username unification).
+ * Only called AFTER the server has confirmed the 2FA code, so nobody can attach an
+ * email address they do not own.
+ */
+async function linkEmailToAccount(profile: UserProfile, cleanEmail: string): Promise<void> {
+  if (!cleanEmail) return;
+  try {
+    const emailHashId = await computeEmailHashKey(cleanEmail);
+    const emailRef = doc(db, 'email_recovery', emailHashId);
+    const emailSnap = await getDoc(emailRef);
+    if (!emailSnap.exists()) {
+      await setDoc(emailRef, {
+        id: emailHashId,
+        uid: profile.uid,
+        username: profile.username,
+        displayName: profile.displayName,
+        maskedEmail: maskEmailAddress(cleanEmail),
+        createdAt: serverTimestamp(),
+      });
+    }
+    localStorage.setItem(`ft_user_email_${profile.uid}`, cleanEmail);
+    localStorage.setItem(`ft_user_email_uname_${profile.username.toLowerCase()}`, cleanEmail);
+  } catch {
+    // Ignore optional email cache update errors
   }
-  return out;
 }
 
 /**
@@ -236,7 +229,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
   const [twoFactorCodeInput, setTwoFactorCodeInput] = useState('');
   const [twoFactorEmailInput, setTwoFactorEmailInput] = useState('');
 
-  // Dispatch a 6-digit 2FA challenge to Firestore + User's Email
+  // Ask the server to email a 6-digit 2FA code to the user
   const issueTwoFactorChallenge = async (
     profile: UserProfile,
     targetEmail: string,
@@ -260,76 +253,39 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
       return;
     }
 
-    const code = generateSixDigitCode();
-    const challengeId = generateChallengeId();
-    const challengeKey = await computeTwoFactorChallengeKey(challengeId, code);
     const masked = maskEmailAddress(cleanEmail);
 
-    const challengePath = `two_factor_challenges/${challengeKey}`;
-    try {
-      await setDoc(doc(db, 'two_factor_challenges', challengeKey), {
-        id: challengeKey,
-        uid: profile.uid,
-        maskedEmail: masked,
-        purpose,
-        createdAt: serverTimestamp(),
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, challengePath);
-    }
-
-    // Also link email_recovery if not already linked so future logins know this user's email
-    try {
-      const emailHashId = await computeEmailHashKey(cleanEmail);
-      const emailRef = doc(db, 'email_recovery', emailHashId);
-      const emailSnap = await getDoc(emailRef);
-      if (!emailSnap.exists()) {
-        await setDoc(emailRef, {
-          id: emailHashId,
-          uid: profile.uid,
-          username: profile.username,
-          displayName: profile.displayName,
-          maskedEmail: masked,
-          createdAt: serverTimestamp(),
-        });
-      }
-      localStorage.setItem(`ft_user_email_${profile.uid}`, cleanEmail);
-      localStorage.setItem(
-        `ft_user_email_uname_${profile.username.toLowerCase()}`,
-        cleanEmail
-      );
-    } catch {
-      // Ignore optional email cache update errors
-    }
-
-    // Call backend API to email the 6-digit 2FA verification code
-    let previewUrl: string | null = null;
-    let fallbackCode: string | null = null;
-    let deliveredVia = 'smtp';
-
+    // The SERVER generates the 6-digit code and emails it. The browser never receives the code.
+    let challengeId = '';
     try {
       const resp = await fetch('/api/auth/send-2fa-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: cleanEmail,
-          code,
           username: profile.displayName || profile.username,
           purpose,
         }),
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        previewUrl = data.previewUrl || null;
-        fallbackCode = data.dispatchFallbackCode || null;
-        deliveredVia = data.deliveredVia || 'smtp';
-      } else {
-        fallbackCode = code;
-        deliveredVia = 'simulated_outbox';
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok || !data.challengeId) {
+        throw new Error(data.error || 'Could not send the verification email. Please try again.');
       }
-    } catch {
-      fallbackCode = code;
-      deliveredVia = 'simulated_outbox';
+      challengeId = data.challengeId as string;
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Could not send the verification email. Please try again.'
+      );
+      // Never let someone in when the code could not be sent.
+      if (!pending2FA) {
+        sessionStorage.removeItem('ft_pending_2fa');
+        try {
+          await firebaseSignOut(auth);
+        } catch {
+          // Ignore
+        }
+      }
+      return;
     }
 
     setPending2FA({
@@ -339,9 +295,6 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
       maskedEmail: masked,
       purpose,
       needsEmailInput: false,
-      previewUrl,
-      fallbackCode,
-      deliveredVia,
     });
     setTwoFactorCodeInput('');
     setSuccessMsg(`A 6-digit verification code has been sent to ${cleanEmail}.`);
@@ -372,7 +325,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
       return;
     }
 
-    // Step B: Verify the 6-digit code against /two_factor_challenges/{challengeKey}
+    // Step B: Verify the 6-digit code with the server
     const cleanCode = twoFactorCodeInput.trim().replace(/\s+/g, '');
     if (!/^\d{6}$/.test(cleanCode)) {
       setErrorMsg('Please enter the 6-digit numeric verification code.');
@@ -381,24 +334,25 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
 
     setBusy(true);
     try {
-      const challengeKey = await computeTwoFactorChallengeKey(pending2FA.challengeId, cleanCode);
-      const challengeRef = doc(db, 'two_factor_challenges', challengeKey);
-      const challengeSnap = await getDoc(challengeRef);
+      // The SERVER checks the code (expiry, attempt limit, single use).
+      const resp = await fetch('/api/auth/verify-2fa-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ challengeId: pending2FA.challengeId, code: cleanCode }),
+      });
+      const data = await resp.json().catch(() => ({}));
 
-      if (!challengeSnap.exists() || challengeSnap.data().uid !== pending2FA.profile.uid) {
+      if (!resp.ok || !data.ok || data.email !== pending2FA.email) {
         setErrorMsg(
-          'Invalid 6-digit verification code. Please check the code sent to your email and try again.'
+          data.error ||
+            'Invalid 6-digit verification code. Please check the code sent to your email and try again.'
         );
         setBusy(false);
         return;
       }
 
-      // Consume/delete the used 2FA challenge document
-      try {
-        await deleteDoc(challengeRef);
-      } catch {
-        // Ignore delete failure if already consumed
-      }
+      // Code verified: now it is safe to link this email to the account.
+      await linkEmailToAccount(pending2FA.profile, pending2FA.email);
 
       // Mark 2FA verified and complete login!
       sessionStorage.removeItem('ft_pending_2fa');
@@ -864,47 +818,6 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                     />
                   </div>
                 )}
-
-                {/* Live Email Inbox Preview / Dispatch Box so users can always view their emailed 2FA code even without custom SMTP */}
-                {!pending2FA.needsEmailInput &&
-                  (pending2FA.previewUrl || pending2FA.fallbackCode) && (
-                    <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
-                          <Mail className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Email Dispatch Receipt</span>
-                        </span>
-                        {pending2FA.previewUrl && (
-                          <a
-                            href={pending2FA.previewUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-800 underline"
-                          >
-                            <span>Open Emailed Message</span>
-                            <ExternalLink className="w-3 h-3" />
-                          </a>
-                        )}
-                      </div>
-                      {pending2FA.fallbackCode && (
-                        <div className="flex items-center justify-between bg-white border border-slate-200 rounded-md px-3 py-2">
-                          <div className="text-xs text-slate-600">
-                            Dispatched 2FA Code:{' '}
-                            <span className="font-mono font-bold text-slate-900 text-sm tracking-widest ml-1">
-                              {pending2FA.fallbackCode}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setTwoFactorCodeInput(pending2FA.fallbackCode || '')}
-                            className="px-2.5 py-1 text-[11px] font-semibold bg-slate-900 text-white rounded hover:bg-slate-800 transition-colors"
-                          >
-                            Auto-Fill Code
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
 
                 {errorMsg && (
                   <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700 flex items-start gap-2">
