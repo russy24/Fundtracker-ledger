@@ -1,0 +1,448 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Primitive Helpers
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Primary Owner / Super Admin helper: strictly franzatuel@gmail.com with verified email
+    function isAppAdmin() {
+      return request.auth != null &&
+        request.auth.token.email == 'franzatuel@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    // Delegated Wipe Authority helper: true if Super Admin OR if actor's UID is in /wipe_authorities/{uid}
+    function hasWipeAuthority(actorUid) {
+      return isAppAdmin() ||
+        (request.auth != null && exists(/databases/$(database)/documents/wipe_authorities/$(request.auth.uid))) ||
+        (isValidId(actorUid) && exists(/databases/$(database)/documents/wipe_authorities/$(actorUid)));
+    }
+
+    // Dual-auth helper: verifies either a Google Firebase Auth session OR a registered Username/Email account in /users/{uid}
+    function isRegisteredUser(uid) {
+      return isValidId(uid) && (
+        (request.auth != null && request.auth.uid == uid) ||
+        exists(/databases/$(database)/documents/users/$(uid))
+      );
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'username', 'displayName', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'username', 'displayName', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.username is string && data.username.size() >= 2 && data.username.size() <= 40 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUsernameCredential(data) {
+      return data.keys().hasAll(['id', 'uid', 'username', 'displayName', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'uid', 'username', 'displayName', 'createdAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.username is string && data.username.size() >= 2 && data.username.size() <= 40 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidEmailRecoveryRecord(data) {
+      return data.keys().hasAll(['id', 'uid', 'username', 'displayName', 'maskedEmail', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'uid', 'username', 'displayName', 'maskedEmail', 'createdAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.username is string && data.username.size() >= 2 && data.username.size() <= 40 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.maskedEmail is string && data.maskedEmail.size() >= 3 && data.maskedEmail.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidEmailTwoFactorChallenge(data) {
+      return data.keys().hasAll(['id', 'uid', 'maskedEmail', 'purpose', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'uid', 'maskedEmail', 'purpose', 'createdAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.maskedEmail is string && data.maskedEmail.size() >= 3 && data.maskedEmail.size() <= 120 &&
+        data.purpose is string && data.purpose.size() <= 20 && data.purpose in ['signin', 'signup', 'google', 'recover'] &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidWipeAuthorityRecord(data) {
+      return data.keys().hasAll(['uid', 'username', 'displayName', 'grantedByEmail', 'grantedAt']) &&
+        data.keys().hasOnly(['uid', 'username', 'displayName', 'grantedByEmail', 'grantedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.username is string && data.username.size() >= 1 && data.username.size() <= 60 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.grantedByEmail is string && data.grantedByEmail.size() >= 3 && data.grantedByEmail.size() <= 120 &&
+        data.grantedAt is timestamp;
+    }
+
+    function isValidUserJoinedRoom(data) {
+      return data.keys().hasAll(['uid', 'roomId', 'roomName', 'currency', 'role', 'approvalStatus', 'joinedAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'roomId', 'roomName', 'currency', 'role', 'approvalStatus', 'joinedAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 64 && data.roomId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.roomName is string && data.roomName.size() >= 1 && data.roomName.size() <= 80 &&
+        data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 8 &&
+        data.currency in ['₱', '$', '€', '¥'] &&
+        data.role is string && data.role.size() <= 20 && data.role in ['treasurer', 'auditor', 'student'] &&
+        data.approvalStatus is string && data.approvalStatus.size() <= 20 && data.approvalStatus in ['pending', 'approved'] &&
+        data.joinedAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRoom(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'currency', 'treasurerId', 'treasurerName',
+          'auditorId', 'auditorName', 'auditorCanModify', 'isPublicRoom',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'name', 'currency', 'treasurerId', 'treasurerName',
+          'auditorId', 'auditorName', 'auditorCanModify', 'isPublicRoom',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 8 &&
+        data.currency in ['₱', '$', '€', '¥'] &&
+        data.treasurerId is string && data.treasurerId.size() <= 128 &&
+        data.treasurerName is string && data.treasurerName.size() <= 80 &&
+        data.auditorId is string && data.auditorId.size() <= 128 &&
+        data.auditorName is string && data.auditorName.size() <= 80 &&
+        data.auditorCanModify is bool &&
+        data.isPublicRoom is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRoomMember(data) {
+      return data.keys().hasAll(['uid', 'roomId', 'username', 'role', 'joinedAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'roomId', 'username', 'role', 'approvalStatus', 'joinedAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 64 && data.roomId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.username is string && data.username.size() >= 1 && data.username.size() <= 60 &&
+        data.role is string && data.role.size() <= 20 && data.role in ['treasurer', 'auditor', 'student'] &&
+        (!('approvalStatus' in data) || (data.approvalStatus is string && data.approvalStatus.size() <= 20 && data.approvalStatus in ['pending', 'approved'])) &&
+        data.joinedAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLedgerEntry(data) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'entryDate', 'title', 'category', 'amount', 'type', 'note',
+          'contributorUid', 'contributorName', 'verified', 'verifiedByUid', 'verifiedByName',
+          'flagged', 'auditNote', 'createdByUid', 'createdByName',
+          'lastModifiedByUid', 'lastModifiedByName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'roomId', 'entryDate', 'title', 'category', 'amount', 'type', 'note',
+          'contributorUid', 'contributorName', 'verified', 'verifiedByUid', 'verifiedByName',
+          'flagged', 'auditNote', 'createdByUid', 'createdByName',
+          'lastModifiedByUid', 'lastModifiedByName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 && data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 64 && data.roomId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.entryDate is string && data.entryDate.size() == 10 && data.entryDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+        data.amount is number && data.amount > 0 && data.amount <= 1000000000 &&
+        data.type is string && data.type.size() <= 12 && data.type in ['add', 'subtract'] &&
+        data.note is string && data.note.size() <= 300 &&
+        data.contributorUid is string && data.contributorUid.size() <= 128 &&
+        data.contributorName is string && data.contributorName.size() <= 80 &&
+        data.verified is bool &&
+        data.verifiedByUid is string && data.verifiedByUid.size() <= 128 &&
+        data.verifiedByName is string && data.verifiedByName.size() <= 80 &&
+        data.flagged is bool &&
+        data.auditNote is string && data.auditNote.size() <= 300 &&
+        data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128 &&
+        data.createdByName is string && data.createdByName.size() >= 1 && data.createdByName.size() <= 80 &&
+        data.lastModifiedByUid is string && data.lastModifiedByUid.size() >= 1 && data.lastModifiedByUid.size() <= 128 &&
+        data.lastModifiedByName is string && data.lastModifiedByName.size() >= 1 && data.lastModifiedByName.size() <= 80 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Master Gate Helpers for Room RBAC
+    function isRoomTreasurerUid(roomId, actorUid) {
+      return isRegisteredUser(actorUid) &&
+        get(/databases/$(database)/documents/rooms/$(roomId)).data.treasurerId == actorUid;
+    }
+
+    function isRoomAuditorUid(roomId, actorUid) {
+      return isRegisteredUser(actorUid) &&
+        get(/databases/$(database)/documents/rooms/$(roomId)).data.auditorId == actorUid;
+    }
+
+    function isAuthorizedAuditorToModifyUid(roomId, actorUid) {
+      return isRoomAuditorUid(roomId, actorUid) &&
+        get(/databases/$(database)/documents/rooms/$(roomId)).data.auditorCanModify == true;
+    }
+
+    function canModifyRoomExpensesUid(roomId, actorUid) {
+      return isRoomTreasurerUid(roomId, actorUid) || isAuthorizedAuditorToModifyUid(roomId, actorUid);
+    }
+
+    // Collection: /users/{userId} (Non-PII public directory: uid, username, displayName)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (resource == null || existing().uid == userId);
+      allow list: if request.time != null;
+      allow create: if isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        isRegisteredUser(userId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName']);
+
+      // Subcollection: /users/{userId}/joined_rooms/{roomId}
+      match /joined_rooms/{roomId} {
+        allow get: if isValidId(userId) && isValidId(roomId) && (resource == null || existing().uid == userId);
+        allow list: if request.time != null;
+        allow create: if isValidId(userId) && isValidId(roomId) &&
+          isValidUserJoinedRoom(incoming()) &&
+          incoming().uid == userId &&
+          incoming().roomId == roomId &&
+          incoming().joinedAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isRegisteredUser(userId);
+        allow update: if isValidId(userId) && isValidId(roomId) &&
+          isValidUserJoinedRoom(incoming()) &&
+          incoming().uid == existing().uid &&
+          incoming().roomId == existing().roomId &&
+          incoming().joinedAt == existing().joinedAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['roomName', 'currency', 'role', 'approvalStatus', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(roomId) && (
+          resource == null ||
+          isAppAdmin() ||
+          existing().uid == userId
+        );
+      }
+    }
+
+    // Collection: /username_credentials/{credId}
+    match /username_credentials/{credId} {
+      allow get: if isValidId(credId) && (resource == null || existing().id == credId);
+      allow list: if request.time != null;
+      allow create: if isValidId(credId) &&
+        isValidUsernameCredential(incoming()) &&
+        incoming().id == credId &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(credId) &&
+        isValidUsernameCredential(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'username', 'displayName', 'createdAt']);
+    }
+
+    // Collection: /email_recovery/{emailHashId}
+    match /email_recovery/{emailHashId} {
+      allow get: if isValidId(emailHashId) && (resource == null || existing().id == emailHashId);
+      allow list: if request.time != null;
+      allow create: if isValidId(emailHashId) &&
+        isValidEmailRecoveryRecord(incoming()) &&
+        incoming().id == emailHashId &&
+        incoming().createdAt == request.time &&
+        isRegisteredUser(incoming().uid);
+      allow update: if isValidId(emailHashId) &&
+        isValidEmailRecoveryRecord(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['uid', 'username', 'displayName', 'maskedEmail', 'createdAt']);
+    }
+
+    // Collection: /two_factor_challenges/{challengeKey}
+    match /two_factor_challenges/{challengeKey} {
+      // Point lookup only by exact challengeId_codeHash key (`list` is strictly forbidden)
+      allow get: if isValidId(challengeKey) && (resource == null || existing().id == challengeKey);
+      allow create: if isValidId(challengeKey) &&
+        isValidEmailTwoFactorChallenge(incoming()) &&
+        incoming().id == challengeKey &&
+        incoming().createdAt == request.time;
+      allow delete: if isValidId(challengeKey) && existing().id == challengeKey;
+    }
+
+    // Collection: /wipe_authorities/{targetUid}
+    match /wipe_authorities/{targetUid} {
+      allow get: if isValidId(targetUid) && (resource == null || existing().uid == targetUid);
+      allow list: if request.time != null;
+      allow create: if isValidId(targetUid) &&
+        isValidWipeAuthorityRecord(incoming()) &&
+        incoming().uid == targetUid &&
+        incoming().grantedAt == request.time;
+      allow delete: if isValidId(targetUid) && existing().uid == targetUid;
+    }
+
+    // Collection: /rooms/{roomId}
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId) && (resource == null || existing().isPublicRoom == true);
+      allow list: if request.time != null;
+
+      allow create: if isValidId(roomId) &&
+        isValidRoom(incoming()) &&
+        incoming().id == roomId &&
+        incoming().isPublicRoom == true &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().treasurerId == '' || isRegisteredUser(incoming().treasurerId)) &&
+        (incoming().auditorId == '' || isRegisteredUser(incoming().auditorId));
+
+      allow update: if isValidId(roomId) &&
+        isValidRoom(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().isPublicRoom == existing().isPublicRoom &&
+        incoming().updatedAt == request.time && (
+          isAppAdmin() ||
+          // Action 0: Authorized Wipe user stamps treasurerId before deleting room
+          (hasWipeAuthority(incoming().treasurerId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['treasurerId', 'treasurerName', 'updatedAt'])) ||
+          // Action 1: Treasurer full room management (currency, name, auditorCanModify authorization, auditor assignment)
+          (existing().treasurerId != '' &&
+            isRegisteredUser(existing().treasurerId) &&
+            incoming().treasurerId == existing().treasurerId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'currency', 'treasurerName', 'auditorId', 'auditorName', 'auditorCanModify', 'updatedAt'
+            ])) ||
+          // Action 2: Claim vacant Treasurer seat
+          (existing().treasurerId == '' &&
+            incoming().treasurerId != '' &&
+            isRegisteredUser(incoming().treasurerId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['treasurerId', 'treasurerName', 'updatedAt'])) ||
+          // Action 3: Claim vacant Auditor seat
+          (existing().auditorId == '' &&
+            incoming().auditorId != '' &&
+            isRegisteredUser(incoming().auditorId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['auditorId', 'auditorName', 'updatedAt'])) ||
+          // Action 4: Current Treasurer steps down
+          (existing().treasurerId != '' &&
+            isRegisteredUser(existing().treasurerId) &&
+            incoming().treasurerId == '' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['treasurerId', 'treasurerName', 'updatedAt'])) ||
+          // Action 5: Current Auditor steps down
+          (existing().auditorId != '' &&
+            isRegisteredUser(existing().auditorId) &&
+            incoming().auditorId == '' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['auditorId', 'auditorName', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(roomId) && (
+        resource == null ||
+        isAppAdmin() ||
+        existing().isPublicRoom == true ||
+        hasWipeAuthority(existing().treasurerId)
+      );
+    }
+
+    // Subcollection: /rooms/{roomId}/members/{memberId}
+    match /rooms/{roomId}/members/{memberId} {
+      allow get: if isValidId(roomId) && isValidId(memberId) && (resource == null || existing().roomId == roomId);
+      allow list: if request.time != null;
+
+      allow create: if isValidId(roomId) && isValidId(memberId) &&
+        isValidRoomMember(incoming()) &&
+        incoming().uid == memberId &&
+        incoming().roomId == roomId &&
+        incoming().joinedAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isRegisteredUser(memberId) &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+        (
+          incoming().role == 'student' ||
+          (incoming().role == 'treasurer' && isRoomTreasurerUid(roomId, memberId)) ||
+          (incoming().role == 'auditor' && isRoomAuditorUid(roomId, memberId))
+        );
+
+      allow update: if isValidId(roomId) && isValidId(memberId) &&
+        isValidRoomMember(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().roomId == existing().roomId &&
+        incoming().joinedAt == existing().joinedAt &&
+        incoming().updatedAt == request.time &&
+        isRegisteredUser(memberId) &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) && (
+          isAppAdmin() ||
+          // Action 1: Member or Treasurer/Auditor updates role, username, or approvalStatus
+          (incoming().diff(existing()).affectedKeys().hasOnly(['role', 'username', 'approvalStatus', 'updatedAt']) &&
+            (
+              incoming().role == 'student' ||
+              (incoming().role == 'treasurer' && isRoomTreasurerUid(roomId, memberId)) ||
+              (incoming().role == 'auditor' && isRoomAuditorUid(roomId, memberId))
+            ))
+        );
+
+      allow delete: if isValidId(roomId) && isValidId(memberId) && (
+        resource == null ||
+        isAppAdmin() ||
+        existing().roomId == roomId
+      );
+    }
+
+    // Subcollection: /rooms/{roomId}/entries/{entryId}
+    match /rooms/{roomId}/entries/{entryId} {
+      allow get: if isValidId(roomId) && isValidId(entryId) && (resource == null || existing().roomId == roomId);
+      allow list: if request.time != null;
+
+      allow create: if isValidId(roomId) && isValidId(entryId) &&
+        isValidLedgerEntry(incoming()) &&
+        incoming().id == entryId &&
+        incoming().roomId == roomId &&
+        incoming().lastModifiedByUid == incoming().createdByUid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+        canModifyRoomExpensesUid(roomId, incoming().createdByUid);
+
+      allow update: if isValidId(roomId) && isValidId(entryId) &&
+        isValidLedgerEntry(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().roomId == existing().roomId &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdByName == existing().createdByName &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)) && (
+          isAppAdmin() ||
+          // Action 1: Expense & Fund Modification (Treasurer OR Authorized Auditor when auditorCanModify == true)
+          (canModifyRoomExpensesUid(roomId, incoming().lastModifiedByUid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'entryDate', 'title', 'category', 'amount', 'type', 'note',
+              'contributorUid', 'contributorName', 'verified', 'verifiedByUid', 'verifiedByName',
+              'flagged', 'auditNote', 'lastModifiedByUid', 'lastModifiedByName', 'updatedAt'
+            ])) ||
+          // Action 2: Auditor Verification & Flagging (Auditor can ALWAYS verify or flag entries)
+          (
+            (isRoomAuditorUid(roomId, incoming().verifiedByUid) || isRoomAuditorUid(roomId, incoming().lastModifiedByUid)) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'verified', 'verifiedByUid', 'verifiedByName', 'flagged', 'auditNote',
+              'lastModifiedByUid', 'lastModifiedByName', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(roomId) && isValidId(entryId) && (
+        resource == null ||
+        isAppAdmin() ||
+        existing().roomId == roomId
+      );
+    }
+  }
+}

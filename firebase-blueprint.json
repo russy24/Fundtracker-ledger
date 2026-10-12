@@ -1,0 +1,467 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public user profile with username and initial identity.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "username", "displayName", "createdAt"]
+    },
+    "UsernameCredential": {
+      "title": "UsernameCredential",
+      "description": "Server-validated username credential record keyed by normalized username_passwordHash.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "uid", "username", "displayName", "createdAt"]
+    },
+    "EmailRecoveryRecord": {
+      "title": "EmailRecoveryRecord",
+      "description": "SHA-256 hashed recovery email lookup record for account recovery and password reset without exposing PII.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "maskedEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "uid", "username", "displayName", "maskedEmail", "createdAt"]
+    },
+    "WipeAuthorityRecord": {
+      "title": "WipeAuthorityRecord",
+      "description": "Delegated authority record granted by the Super Admin (franzatuel@gmail.com) allowing a user to wipe rooms and data.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "grantedByEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "username", "displayName", "grantedByEmail", "grantedAt"]
+    },
+    "EmailTwoFactorChallenge": {
+      "title": "EmailTwoFactorChallenge",
+      "description": "Hashed 6-digit email two-factor authentication (2FA) challenge record keyed by challengeId_codeHash.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "maskedEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "purpose": {
+          "type": "string",
+          "enum": ["signin", "signup", "google", "recover"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "uid", "maskedEmail", "purpose", "createdAt"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Financial fund tracker room configuration, roles, and authorization settings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "currency": {
+          "type": "string",
+          "maxLength": 8,
+          "enum": ["₱", "$", "€", "¥"]
+        },
+        "treasurerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "treasurerName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "auditorId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "auditorName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "auditorCanModify": {
+          "type": "boolean",
+          "description": "True when the Treasurer explicitly authorizes the Auditor to modify expenses and manage funds."
+        },
+        "isPublicRoom": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "currency",
+        "treasurerId",
+        "treasurerName",
+        "auditorId",
+        "auditorName",
+        "auditorCanModify",
+        "isPublicRoom",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RoomMember": {
+      "title": "RoomMember",
+      "description": "Membership record assigning a user to Treasurer, Auditor, or Student POV in a room with approval status.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "role": {
+          "type": "string",
+          "enum": ["treasurer", "auditor", "student"]
+        },
+        "approvalStatus": {
+          "type": "string",
+          "enum": ["pending", "approved"]
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "roomId", "username", "role", "joinedAt", "updatedAt"]
+    },
+    "UserJoinedRoom": {
+      "title": "UserJoinedRoom",
+      "description": "Personal index of rooms a user has joined or requested to join so Active Shared FundTracker Rooms displays only their own rooms.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "currency": {
+          "type": "string",
+          "maxLength": 8,
+          "enum": ["₱", "$", "€", "¥"]
+        },
+        "role": {
+          "type": "string",
+          "enum": ["treasurer", "auditor", "student"]
+        },
+        "approvalStatus": {
+          "type": "string",
+          "enum": ["pending", "approved"]
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "roomId", "roomName", "currency", "role", "approvalStatus", "joinedAt", "updatedAt"]
+    },
+    "LedgerEntry": {
+      "title": "LedgerEntry",
+      "description": "Financial transaction entry (contribution/fund addition or expense) with verification and audit status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "entryDate": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "amount": {
+          "type": "number"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["add", "subtract"]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "contributorUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "contributorName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "verifiedByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "verifiedByName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "flagged": {
+          "type": "boolean"
+        },
+        "auditNote": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdByName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "lastModifiedByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "lastModifiedByName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "entryDate",
+        "title",
+        "category",
+        "amount",
+        "type",
+        "note",
+        "contributorUid",
+        "contributorName",
+        "verified",
+        "verifiedByUid",
+        "verifiedByName",
+        "flagged",
+        "auditNote",
+        "createdByUid",
+        "createdByName",
+        "lastModifiedByUid",
+        "lastModifiedByName",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Public user profiles containing non-PII username and display name."
+    },
+    "/users/{userId}/joined_rooms/{roomId}": {
+      "schema": "UserJoinedRoom",
+      "description": "Rooms the user has joined or requested to join."
+    },
+    "/username_credentials/{credId}": {
+      "schema": "UsernameCredential",
+      "description": "Username and hashed password credential records for instant username sign-up and sign-in."
+    },
+    "/email_recovery/{emailHashId}": {
+      "schema": "EmailRecoveryRecord",
+      "description": "SHA-256 hashed recovery email lookup records for recovering usernames and resetting passwords."
+    },
+    "/two_factor_challenges/{challengeKey}": {
+      "schema": "EmailTwoFactorChallenge",
+      "description": "Hashed 6-digit 2FA verification challenges for Sign-In, Sign-Up, and Google login."
+    },
+    "/wipe_authorities/{targetUid}": {
+      "schema": "WipeAuthorityRecord",
+      "description": "Users explicitly authorized by the Super Admin (franzatuel@gmail.com) to wipe rooms and data."
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "FundTracker rooms containing role assignments and Auditor modification authorization."
+    },
+    "/rooms/{roomId}/members/{memberId}": {
+      "schema": "RoomMember",
+      "description": "Members enrolled in a specific FundTracker room with their POV role."
+    },
+    "/rooms/{roomId}/entries/{entryId}": {
+      "schema": "LedgerEntry",
+      "description": "Financial entries (income/contributions and expenses) in a room."
+    }
+  }
+}

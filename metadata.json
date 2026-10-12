@@ -1,0 +1,6 @@
+{
+  "name": "FundTracker Ledger",
+  "description": "Collaborative role-based financial calendar and fund tracker for Treasurers, Auditors, and Students with Firebase Authentication and real-time expense verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
