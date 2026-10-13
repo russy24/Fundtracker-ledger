@@ -415,6 +415,35 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
     }
   };
 
+  // DEVELOPMENT ONLY: lets you preview/edit the app without the email 2FA.
+  // `import.meta.env.DEV` is false in production builds (npm run build), so this
+  // function and the button below are removed from the version deployed to Render.
+  const handleDevSkipLogin = async () => {
+    if (!import.meta.env.DEV) return;
+    setBusy(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    const devProfile: UserProfile = {
+      uid: 'dev_local_tester',
+      username: 'devtester',
+      displayName: 'Dev Tester',
+    };
+    try {
+      const userRef = doc(db, 'users', devProfile.uid);
+      const snap = await getDoc(userRef);
+      if (!snap.exists()) {
+        await setDoc(userRef, { ...devProfile, createdAt: serverTimestamp() });
+      }
+      localStorage.setItem('ft_2fa_verified_uid', devProfile.uid);
+      localStorage.setItem('ft_active_session', JSON.stringify(devProfile));
+      onAuthenticated(devProfile);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleUsernameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -1090,6 +1119,22 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </form>
+
+              {import.meta.env.DEV && (
+                <div className="pt-4 border-t border-dashed border-amber-300 space-y-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">
+                    Development only · not shown on the live site
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleDevSkipLogin}
+                    disabled={busy}
+                    className="w-full py-2 px-4 text-sm font-medium text-amber-900 bg-amber-50 border border-amber-300 rounded-lg hover:bg-amber-100 transition-colors disabled:opacity-50"
+                  >
+                    Skip login as "Dev Tester"
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
