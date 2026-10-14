@@ -65,6 +65,7 @@ import {
   Clock,
   UserCheck,
   UserPlus,
+  ChevronDown,
 } from 'lucide-react';
 
 const CURRENCIES: CurrencySymbol[] = ['₱', '$', '€', '¥'];
@@ -80,6 +81,33 @@ const CATEGORIES = [
   'Emergency Reserve',
   'General Fund',
 ];
+
+interface BatchRow {
+  key: string;
+  contributorUid: string;
+  contributorName: string;
+  title: string;
+  amount: string;
+  type: 'add' | 'subtract';
+  category: string;
+  note: string;
+}
+
+function newBatchRow(partial: Partial<BatchRow> = {}): BatchRow {
+  return {
+    key: Math.random().toString(36).slice(2, 10),
+    contributorUid: '',
+    contributorName: '',
+    title: '',
+    amount: '',
+    type: 'add',
+    category: CATEGORIES[0],
+    note: '',
+    ...partial,
+  };
+}
+
+const MAX_BATCH_ROWS = 100;
 
 function generateId(len = 8): string {
   const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -174,6 +202,11 @@ export default function App() {
   const [entryBusy, setEntryBusy] = useState(false);
   const [entryError, setEntryError] = useState('');
 
+  // Multi-entry (batch) maker: one shared date, many rows
+  const [entryPanelOpen, setEntryPanelOpen] = useState(false);
+  const [batchRows, setBatchRows] = useState<BatchRow[]>(() => [newBatchRow()]);
+  const entryPanelRef = React.useRef<HTMLDivElement | null>(null);
+
   // Audit Note Drafts
   const [auditNotesDraft, setAuditNotesDraft] = useState<Record<string, string>>({});
 
@@ -188,6 +221,31 @@ export default function App() {
       setEntryDate(selectedDate);
     }
   }, [selectedDate]);
+
+  // Clicking a calendar day: select it, prefill the date and open the entry popup listing every member.
+  // Clicking the selected day again while the popup is closed re-opens it instead of clearing.
+  const handleCalendarDateClick = (date: string | null) => {
+    if (date === null && selectedDate) {
+      if (!entryPanelOpen && canModifyExpenses) openEntryModal();
+      else setSelectedDate(null);
+      return;
+    }
+    setSelectedDate(date);
+    if (date) {
+      setEntryDate(date);
+      if (canModifyExpenses) openEntryModal();
+    }
+  };
+
+  // Close the popup with Escape
+  useEffect(() => {
+    if (!entryPanelOpen) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setEntryPanelOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [entryPanelOpen]);
 
   // Listen to Firebase Auth (Google sign-in) or verify persisted Username session
   useEffect(() => {
@@ -1425,6 +1483,158 @@ export default function App() {
     }
   };
 
+  // Everyone who can be credited on an entry: Treasurer + Auditor + all approved members
+  const rosterPeople = useMemo(() => {
+    const byUid = new Map<string, { uid: string; name: string; role: RoleType }>();
+    if (room?.treasurerId && room.treasurerName) {
+      byUid.set(room.treasurerId, { uid: room.treasurerId, name: room.treasurerName, role: 'treasurer' });
+    }
+    if (room?.auditorId && room.auditorName) {
+      byUid.set(room.auditorId, { uid: room.auditorId, name: room.auditorName, role: 'auditor' });
+    }
+    approvedMembers.forEach((m) => {
+      const role: RoleType =
+        room?.treasurerId === m.uid ? 'treasurer' : room?.auditorId === m.uid ? 'auditor' : m.role;
+      byUid.set(m.uid, { uid: m.uid, name: m.username, role });
+    });
+    const order: Record<RoleType, number> = { treasurer: 0, auditor: 1, student: 2 };
+    return Array.from(byUid.values()).sort(
+      (a, b) => order[a.role] - order[b.role] || a.name.localeCompare(b.name)
+    );
+  }, [room, approvedMembers]);
+
+  const makeRosterRows = (type: 'add' | 'subtract' = 'add', category: string = CATEGORIES[0]) =>
+    rosterPeople.map((p) =>
+      newBatchRow({ contributorUid: p.uid, contributorName: p.name, type, category })
+    );
+
+  // Open the entry popup. If nothing has been typed yet, pre-fill one row per person in the room.
+  const openEntryModal = () => {
+    setEntryError('');
+    setBatchRows((rows) => {
+      const untouched = rows.every((r) => !r.amount && !r.title && !r.note && (r.contributorUid || !r.contributorName));
+      if (!untouched || rosterPeople.length === 0) return rows;
+      return makeRosterRows(rows[0]?.type, rows[0]?.category).slice(0, MAX_BATCH_ROWS);
+    });
+    setEntryPanelOpen(true);
+  };
+
+  const closeEntryModal = () => {
+    setEntryPanelOpen(false);
+    if (editingEntryId) cancelEditEntry();
+  };
+
+  const updateBatchRow = (key: string, patch: Partial<BatchRow>) =>
+    setBatchRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  const removeBatchRow = (key: string) =>
+    setBatchRows((rows) => (rows.length <= 1 ? [newBatchRow()] : rows.filter((r) => r.key !== key)));
+
+  const addBatchRow = () =>
+    setBatchRows((rows) =>
+      rows.length >= MAX_BATCH_ROWS
+        ? rows
+        : [...rows, newBatchRow({ type: rows[rows.length - 1]?.type, category: rows[rows.length - 1]?.category })]
+    );
+
+  // One blank row per person (Treasurer, Auditor and every student) so amounts can be typed down the list
+  const fillRowsWithEveryone = () => {
+    const last = batchRows[batchRows.length - 1];
+    const existing = new Set(batchRows.map((r) => r.contributorUid).filter(Boolean));
+    const keep = batchRows.filter((r) => r.contributorUid || r.amount || r.title);
+    const added = rosterPeople
+      .filter((p) => !existing.has(p.uid))
+      .map((p) =>
+        newBatchRow({
+          contributorUid: p.uid,
+          contributorName: p.name,
+          type: last?.type || 'add',
+          category: last?.category || CATEGORIES[0],
+        })
+      );
+    setBatchRows([...keep, ...added].slice(0, MAX_BATCH_ROWS));
+  };
+
+  const handleSaveBatch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!room || !userProfile || !canModifyExpenses) return;
+    setEntryError('');
+
+    if (!BLUEPRINT_LIMITS.DATE_REGEX.test(entryDate)) {
+      setEntryError('Date must be in YYYY-MM-DD format.');
+      return;
+    }
+
+    // Rows with no amount are ignored (so "Add everyone" can be left partly blank)
+    const used = batchRows.filter((r) => r.amount.trim() !== '');
+    if (used.length === 0) {
+      setEntryError('Enter an amount on at least one row.');
+      return;
+    }
+
+    const prepared: Array<{ row: BatchRow; amount: number; name: string; uid: string }> = [];
+    for (let i = 0; i < used.length; i++) {
+      const row = used[i];
+      const amount = parseFloat(row.amount);
+      if (isNaN(amount) || amount <= 0 || amount > BLUEPRINT_LIMITS.AMOUNT_MAX) {
+        setEntryError(`Row ${batchRows.indexOf(row) + 1}: amount must be greater than 0.`);
+        return;
+      }
+      const person = rosterPeople.find((p) => p.uid === row.contributorUid);
+      prepared.push({
+        row,
+        amount: Math.round(amount * 100) / 100,
+        uid: person ? person.uid : '',
+        name: sanitizeString(person ? person.name : row.contributorName || myUsername, 80),
+      });
+    }
+
+    setEntryBusy(true);
+    try {
+      // Firestore batches hold up to 500 writes; chunk to stay safely under
+      for (let start = 0; start < prepared.length; start += 400) {
+        const batch = writeBatch(db);
+        prepared.slice(start, start + 400).forEach(({ row, amount, uid, name }) => {
+          const newId = generateId(12);
+          const category = sanitizeString(row.category, BLUEPRINT_LIMITS.ENTRY_CATEGORY_MAX);
+          const title =
+            sanitizeString(row.title, BLUEPRINT_LIMITS.ENTRY_TITLE_MAX) ||
+            sanitizeString(`${category} - ${name}`, BLUEPRINT_LIMITS.ENTRY_TITLE_MAX);
+          batch.set(doc(db, 'rooms', room.id, 'entries', newId), {
+            id: newId,
+            roomId: room.id,
+            entryDate,
+            title,
+            category,
+            amount,
+            type: row.type,
+            note: sanitizeString(row.note, BLUEPRINT_LIMITS.ENTRY_NOTE_MAX),
+            contributorUid: uid,
+            contributorName: name,
+            verified: false,
+            verifiedByUid: '',
+            verifiedByName: '',
+            flagged: false,
+            auditNote: '',
+            createdByUid: userProfile.uid,
+            createdByName: sanitizeString(myUsername, 80),
+            lastModifiedByUid: userProfile.uid,
+            lastModifiedByName: sanitizeString(myUsername, 80),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+      setBatchRows([newBatchRow()]);
+      setEntryPanelOpen(false);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `rooms/${room.id}/entries`);
+    } finally {
+      setEntryBusy(false);
+    }
+  };
+
   // Create or Update Ledger Entry (Treasurer OR Authorized Auditor)
   const handleSaveEntry = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1531,6 +1741,7 @@ export default function App() {
     setEntryNote(entry.note);
     setEntryContributorUid(entry.contributorUid);
     setEntryContributorName(entry.contributorName);
+    setEntryPanelOpen(false);
     setActiveTab('dashboard');
   };
 
@@ -1762,12 +1973,16 @@ export default function App() {
             <a href="#directory" className="hover:text-slate-900 transition-colors">
               My Joined Rooms ({myJoinedRooms.length})
             </a>
-            <a href="#users-directory" className="hover:text-slate-900 transition-colors">
-              All Users & UIDs ({allUsersDirectory.length})
-            </a>
-            <a href="#me-settings" className="hover:text-slate-900 transition-colors">
-              Me & Data Wipe
-            </a>
+            {canWipeRooms && (
+              <>
+                <a href="#users-directory" className="hover:text-slate-900 transition-colors">
+                  All Users & UIDs ({allUsersDirectory.length})
+                </a>
+                <a href="#me-settings" className="hover:text-slate-900 transition-colors">
+                  Me & Data Wipe
+                </a>
+              </>
+            )}
           </nav>
           <div className="flex items-center gap-3">
             <span className="text-xs text-slate-600 hidden sm:inline">
@@ -2026,7 +2241,9 @@ export default function App() {
             )}
           </section>
 
-          {/* REGISTERED USERS & UID DIRECTORY (VISIBLE TO ALL SIGNED-IN USERS, WITH 1-CLICK GRANT SAME AUTHORITY) */}
+          {canWipeRooms && (
+          <>
+          {/* 04. REGISTERED USERS & AUTHORITY DIRECTORY (ADMINS / AUTHORIZED USERS ONLY) */}
           <section
             id="users-directory"
             className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
@@ -2173,8 +2390,12 @@ export default function App() {
               </div>
             )}
           </section>
+          </>
+          )}
 
-          {/* ME & WORKSPACE AUTHORITY CONTROL CENTER (VISIBLE ON MAIN WEBSITE FOR OWNER + ALL AUTHORIZED USERS) */}
+          {canWipeRooms && (
+          <>
+          {/* 05. AUTHORITY CONTROL CENTER (ADMINS / AUTHORIZED USERS ONLY) */}
           <section
             id="me-settings"
             className="bg-white border border-slate-200 rounded-xl p-6 space-y-6"
@@ -2529,6 +2750,8 @@ export default function App() {
               )}
             </div>
           </section>
+          </>
+          )}
         </main>
 
         <footer className="border-t border-slate-200 bg-white px-6 py-4 text-xs text-slate-500 flex items-center justify-between">
@@ -3248,7 +3471,7 @@ export default function App() {
                   month={month}
                   entries={entries}
                   selectedDate={selectedDate}
-                  onSelectDate={setSelectedDate}
+                  onSelectDate={handleCalendarDateClick}
                   symbol={symbol}
                 />
 
@@ -3264,32 +3487,62 @@ export default function App() {
 
               {/* Fund & Expense Modification Form (Strictly for Treasurer OR Authorized Auditor) */}
               {canModifyExpenses ? (
-                <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-                  <div className="flex items-center justify-between">
+                <>
+                <div className="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Record Fund Contributions or Expenses</h3>
+                    <p className="text-xs text-slate-500">
+                      Click a date on the calendar, or use the button, to open the entry window for everyone in the room.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={openEntryModal}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded-lg whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add entries</span>
+                  </button>
+                </div>
+                {(entryPanelOpen || editingEntryId) && (
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                  onClick={closeEntryModal}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Record ledger entries"
+                >
+                <div
+                  ref={entryPanelRef}
+                  onClick={(ev) => ev.stopPropagation()}
+                  className="bg-white rounded-xl shadow-2xl p-5 space-y-4 w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+                >
+                  <div className="flex items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm font-bold text-slate-900">
                         {editingEntryId
                           ? 'Modify Existing Ledger Entry'
-                          : 'Record Fund Contribution or Expense'}
+                          : `Entries for ${entryDate}`}
                       </h3>
                       <p className="text-xs text-slate-500">
                         {isTreasurer
                           ? 'Logging as Room Treasurer'
                           : 'Logging as Auditor (Authorized by Treasurer)'}
+                        {!editingEntryId && ` · ${rosterPeople.length} ${rosterPeople.length === 1 ? 'member' : 'members'} in this room`}
                       </p>
                     </div>
-                    {editingEntryId && (
-                      <button
-                        type="button"
-                        onClick={cancelEditEntry}
-                        className="text-xs text-slate-500 hover:text-slate-900 flex items-center gap-1"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                        <span>Cancel Edit</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={closeEntryModal}
+                      className="text-xs text-slate-500 hover:text-slate-900 flex items-center gap-1"
+                      aria-label="Close"
+                    >
+                      <X className="w-4 h-4" />
+                      <span>{editingEntryId ? 'Cancel Edit' : 'Close'}</span>
+                    </button>
                   </div>
 
+                  {editingEntryId ? (
                   <form onSubmit={handleSaveEntry} className="space-y-4">
                     <div className="grid sm:grid-cols-3 gap-3">
                       <div className="sm:col-span-2">
@@ -3440,7 +3693,183 @@ export default function App() {
                       </span>
                     </button>
                   </form>
+                  ) : (
+                  entryPanelOpen && (
+                    <form onSubmit={handleSaveBatch} className="space-y-4">
+                      <div className="flex flex-wrap items-end gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            Entry Date (all rows)
+                          </label>
+                          <input
+                            type="date"
+                            required
+                            value={entryDate}
+                            onChange={(e) => setEntryDate(e.target.value)}
+                            className="border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-900"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={fillRowsWithEveryone}
+                          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-slate-300 rounded-lg hover:bg-slate-50"
+                        >
+                          <Users className="w-3.5 h-3.5" />
+                          <span>Add everyone ({rosterPeople.length})</span>
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {batchRows.map((row, idx) => (
+                          <div
+                            key={row.key}
+                            className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] font-mono text-slate-500">
+                                Entry {idx + 1}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => removeBatchRow(row.key)}
+                                className="text-slate-400 hover:text-red-600"
+                                aria-label={`Remove entry ${idx + 1}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <div className="grid sm:grid-cols-2 gap-2">
+                              <select
+                                value={row.contributorUid}
+                                onChange={(e) => {
+                                  const uid = e.target.value;
+                                  const person = rosterPeople.find((p) => p.uid === uid);
+                                  updateBatchRow(row.key, {
+                                    contributorUid: uid,
+                                    contributorName: person ? person.name : row.contributorName,
+                                  });
+                                }}
+                                className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+                                aria-label="Person"
+                              >
+                                <option value="">Custom Name / General Organization</option>
+                                {rosterPeople.map((p) => (
+                                  <option key={p.uid} value={p.uid}>
+                                    {p.name} ({p.role})
+                                  </option>
+                                ))}
+                              </select>
+                              {row.contributorUid === '' ? (
+                                <input
+                                  type="text"
+                                  maxLength={80}
+                                  value={row.contributorName}
+                                  onChange={(e) =>
+                                    updateBatchRow(row.key, { contributorName: e.target.value })
+                                  }
+                                  placeholder={`Payee name (default: ${myUsername})`}
+                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm"
+                                />
+                              ) : (
+                                <div className="flex items-center text-xs text-slate-500 px-1">
+                                  {rosterPeople.find((p) => p.uid === row.contributorUid)?.role}
+                                </div>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              <select
+                                value={row.type}
+                                onChange={(e) =>
+                                  updateBatchRow(row.key, { type: e.target.value as 'add' | 'subtract' })
+                                }
+                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+                                aria-label="Type"
+                              >
+                                <option value="add">Contribution (+)</option>
+                                <option value="subtract">Expense (-)</option>
+                              </select>
+                              <input
+                                type="number"
+                                step="0.01"
+                                min="0.01"
+                                value={row.amount}
+                                onChange={(e) => updateBatchRow(row.key, { amount: e.target.value })}
+                                placeholder={`Amount (${symbol})`}
+                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm font-mono"
+                              />
+                              <select
+                                value={row.category}
+                                onChange={(e) => updateBatchRow(row.key, { category: e.target.value })}
+                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
+                                aria-label="Category"
+                              >
+                                {CATEGORIES.map((cat) => (
+                                  <option key={cat} value={cat}>
+                                    {cat}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <details className="text-xs text-slate-500">
+                              <summary className="cursor-pointer select-none">Title / note (optional)</summary>
+                              <div className="grid sm:grid-cols-2 gap-2 mt-2">
+                                <input
+                                  type="text"
+                                  maxLength={120}
+                                  value={row.title}
+                                  onChange={(e) => updateBatchRow(row.key, { title: e.target.value })}
+                                  placeholder="Title"
+                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm text-slate-900"
+                                />
+                                <input
+                                  type="text"
+                                  maxLength={300}
+                                  value={row.note}
+                                  onChange={(e) => updateBatchRow(row.key, { note: e.target.value })}
+                                  placeholder="Reference note / receipt no."
+                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm text-slate-900"
+                                />
+                              </div>
+                            </details>
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={addBatchRow}
+                        disabled={batchRows.length >= MAX_BATCH_ROWS}
+                        className="w-full flex items-center justify-center gap-1.5 py-2 text-xs font-medium border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add another entry</span>
+                      </button>
+
+                      {entryError && <div className="text-xs text-red-600">{entryError}</div>}
+
+                      <button
+                        type="submit"
+                        disabled={entryBusy}
+                        className="w-full flex items-center justify-center gap-1.5 py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium text-sm rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
+                      >
+                        <Plus className="w-4 h-4" />
+                        <span>
+                          {entryBusy
+                            ? 'Saving…'
+                            : `Save ${batchRows.filter((r) => r.amount.trim() !== '').length || ''} ${
+                                batchRows.filter((r) => r.amount.trim() !== '').length === 1
+                                  ? 'Entry'
+                                  : 'Entries'
+                              } to FundTracker`.replace(/\s+/g, ' ')}
+                        </span>
+                      </button>
+                    </form>
+                  )
+                  )}
                 </div>
+                </div>
+                )}
+                </>
               ) : (
                 <div className="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-between gap-4">
                   <div className="space-y-1">
