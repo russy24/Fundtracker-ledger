@@ -350,7 +350,8 @@ export default function App() {
     return () => unsub();
   }, [authReady, userProfile?.uid]);
 
-  // Subscribe to ALL sources of registered usernames (/users, /username_credentials, /email_recovery) so 100% of registered accounts appear
+  // Subscribe to the public /users directory. (The credential and email-recovery collections are
+  // intentionally NOT downloaded: their document IDs contain password verifiers.)
   useEffect(() => {
     if (!authReady || !userProfile) {
       setUsersCollectionList([]);
@@ -379,50 +380,8 @@ export default function App() {
       (err) => handleFirestoreError(err, OperationType.LIST, 'users')
     );
 
-    const unsubCreds = onSnapshot(
-      collection(db, 'username_credentials'),
-      (snap) => {
-        const cList: UserProfile[] = [];
-        snap.forEach((d) => {
-          const data = d.data();
-          if (data?.uid && data?.username) {
-            cList.push({
-              uid: data.uid,
-              username: data.username,
-              displayName: data.displayName || data.username,
-              createdAt: data.createdAt,
-            });
-          }
-        });
-        setCredUsersList(cList);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'username_credentials')
-    );
-
-    const unsubRecovery = onSnapshot(
-      collection(db, 'email_recovery'),
-      (snap) => {
-        const rList: UserProfile[] = [];
-        snap.forEach((d) => {
-          const data = d.data();
-          if (data?.uid && data?.username) {
-            rList.push({
-              uid: data.uid,
-              username: data.username,
-              displayName: data.displayName || data.username,
-              createdAt: data.createdAt,
-            });
-          }
-        });
-        setRecoveryUsersList(rList);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'email_recovery')
-    );
-
     return () => {
       unsubUsers();
-      unsubCreds();
-      unsubRecovery();
     };
   }, [authReady, userProfile]);
 

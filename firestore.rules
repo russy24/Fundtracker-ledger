@@ -243,7 +243,7 @@ service cloud.firestore {
     // Collection: /username_credentials/{credId}
     match /username_credentials/{credId} {
       allow get: if isValidId(credId) && (resource == null || existing().id == credId);
-      allow list: if request.time != null;
+      // `list` removed on purpose: it exposed every credential ID (username + password hash).
       allow create: if isValidId(credId) &&
         isValidUsernameCredential(incoming()) &&
         incoming().id == credId &&
@@ -257,7 +257,7 @@ service cloud.firestore {
     // Collection: /email_recovery/{emailHashId}
     match /email_recovery/{emailHashId} {
       allow get: if isValidId(emailHashId) && (resource == null || existing().id == emailHashId);
-      allow list: if request.time != null;
+      // `list` removed on purpose: it exposed every account's email hash.
       allow create: if isValidId(emailHashId) &&
         isValidEmailRecoveryRecord(incoming()) &&
         incoming().id == emailHashId &&
@@ -270,14 +270,9 @@ service cloud.firestore {
     }
 
     // Collection: /two_factor_challenges/{challengeKey}
+    // No longer used: the server now generates and checks 2FA codes in memory.
     match /two_factor_challenges/{challengeKey} {
-      // Point lookup only by exact challengeId_codeHash key (`list` is strictly forbidden)
-      allow get: if isValidId(challengeKey) && (resource == null || existing().id == challengeKey);
-      allow create: if isValidId(challengeKey) &&
-        isValidEmailTwoFactorChallenge(incoming()) &&
-        incoming().id == challengeKey &&
-        incoming().createdAt == request.time;
-      allow delete: if isValidId(challengeKey) && existing().id == challengeKey;
+      allow read, write: if false;
     }
 
     // Collection: /wipe_authorities/{targetUid}
