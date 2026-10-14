@@ -214,6 +214,12 @@ export async function resolveUnifiedGoogleProfile(user: {
   return profile;
 }
 
+// DEVELOPMENT ONLY skip-login. Double lock:
+//  1) Vite sets import.meta.env.DEV to false in production builds (removes the code), and
+//  2) it is also refused on any *.onrender.com address, even if a dev server runs there by mistake.
+const DEV_LOGIN_ENABLED =
+  import.meta.env.DEV && !/onrender\.com$/i.test(window.location.hostname);
+
 export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
   const [mode, setMode] = useState<'signin' | 'signup' | 'recover'>('signin');
   const [username, setUsername] = useState('');
@@ -416,10 +422,10 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
   };
 
   // DEVELOPMENT ONLY: lets you preview/edit the app without the email 2FA.
-  // `import.meta.env.DEV` is false in production builds (npm run build), so this
-  // function and the button below are removed from the version deployed to Render.
+  // Locked by DEV_LOGIN_ENABLED (see top of this component): off in production builds
+  // and on onrender.com.
   const handleDevSkipLogin = async () => {
-    if (!import.meta.env.DEV) return;
+    if (!DEV_LOGIN_ENABLED) return;
     setBusy(true);
     setErrorMsg('');
     setSuccessMsg('');
@@ -635,7 +641,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
     sessionStorage.setItem('ft_pending_2fa', '1');
     try {
       let resolvedUsername = rawIdentifier.replace(/[^a-zA-Z0-9_-]/g, '');
-      let matchedEmail = recoveryEmail.trim().toLowerCase();
+      let matchedEmail = '';
 
       if (rawIdentifier.includes('@')) {
         matchedEmail = rawIdentifier.toLowerCase();
@@ -680,9 +686,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
         const profile = await resolveUnifiedGoogleProfile(fbCred.user);
         const targetEmail = rawIdentifier.includes('@')
           ? rawIdentifier.toLowerCase()
-          : recoveryEmail.trim().toLowerCase() ||
-            localStorage.getItem(`ft_user_email_${profile.uid}`) ||
-            '';
+          : localStorage.getItem(`ft_user_email_${profile.uid}`) || '';
         await issueTwoFactorChallenge(profile, targetEmail, 'signin');
       } catch {
         sessionStorage.removeItem('ft_pending_2fa');
@@ -1030,15 +1034,14 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                   </div>
                 )}
 
+                {mode !== 'signin' && (
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1 flex items-center gap-1">
                     <Mail className="w-3.5 h-3.5 text-slate-500" />
                     <span>
                       {mode === 'signup'
                         ? 'Gmail / Email Address (Receives 2FA Code & Links Google)'
-                        : mode === 'recover'
-                        ? 'Registered Gmail / Recovery Email (Receives 2FA Code)'
-                        : 'Gmail / Email for 2FA Code (Optional if already linked)'}
+                        : 'Registered Gmail / Recovery Email (Receives 2FA Code)'}
                     </span>
                   </label>
                   <input
@@ -1056,6 +1059,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                     </p>
                   )}
                 </div>
+                )}
 
                 {mode === 'signup' && (
                   <div>
@@ -1120,7 +1124,7 @@ export const AuthPortal: React.FC<AuthPortalProps> = ({ onAuthenticated }) => {
                 </button>
               </form>
 
-              {import.meta.env.DEV && (
+              {DEV_LOGIN_ENABLED && (
                 <div className="pt-4 border-t border-dashed border-amber-300 space-y-2">
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">
                     Development only · not shown on the live site
