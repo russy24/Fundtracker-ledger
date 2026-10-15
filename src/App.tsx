@@ -36,6 +36,9 @@ import {
 } from './types';
 import { AuthPortal, resolveUnifiedGoogleProfile } from './components/AuthPortal';
 import { MonthCalendar, fmtMoney, toDateKey } from './components/MonthCalendar';
+import { EntryModal } from './components/EntryModal';
+import { RoomHub } from './components/RoomHub';
+import { MemberBalances } from './components/MemberBalances';
 import {
   Wallet,
   ShieldCheck,
@@ -161,6 +164,8 @@ export default function App() {
     'all' | 'add' | 'subtract' | 'verified' | 'unverified' | 'flagged'
   >('all');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [ledgerViewMode, setLedgerViewMode] = useState<'stream' | 'members'>('stream');
+  const [selectedMemberForReport, setSelectedMemberForReport] = useState<string | null>(null);
 
   // Room Hub State
   const [newRoomName, setNewRoomName] = useState('');
@@ -205,7 +210,6 @@ export default function App() {
   // Multi-entry (batch) maker: one shared date, many rows
   const [entryPanelOpen, setEntryPanelOpen] = useState(false);
   const [batchRows, setBatchRows] = useState<BatchRow[]>(() => [newBatchRow()]);
-  const entryPanelRef = React.useRef<HTMLDivElement | null>(null);
 
   // Audit Note Drafts
   const [auditNotesDraft, setAuditNotesDraft] = useState<Record<string, string>>({});
@@ -219,33 +223,9 @@ export default function App() {
   useEffect(() => {
     if (selectedDate) {
       setEntryDate(selectedDate);
+      setEntryPanelOpen(true);
     }
   }, [selectedDate]);
-
-  // Clicking a calendar day: select it, prefill the date and open the entry popup listing every member.
-  // Clicking the selected day again while the popup is closed re-opens it instead of clearing.
-  const handleCalendarDateClick = (date: string | null) => {
-    if (date === null && selectedDate) {
-      if (!entryPanelOpen && canModifyExpenses) openEntryModal();
-      else setSelectedDate(null);
-      return;
-    }
-    setSelectedDate(date);
-    if (date) {
-      setEntryDate(date);
-      if (canModifyExpenses) openEntryModal();
-    }
-  };
-
-  // Close the popup with Escape
-  useEffect(() => {
-    if (!entryPanelOpen) return;
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') setEntryPanelOpen(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [entryPanelOpen]);
 
   // Listen to Firebase Auth (Google sign-in) or verify persisted Username session
   useEffect(() => {
@@ -281,13 +261,6 @@ export default function App() {
           if (saved) {
             const parsed = JSON.parse(saved) as UserProfile;
             if (parsed?.uid) {
-              if (
-                parsed.username?.toLowerCase().includes('franz') ||
-                parsed.displayName?.toLowerCase().includes('franz') ||
-                parsed.uid === 'aMVdQVuMuYMISlIcFuafEA8l8v53'
-              ) {
-                setIsSuperAdmin(true);
-              }
               const snap = await getDoc(doc(db, 'users', parsed.uid));
               if (!snap.exists()) {
                 await setDoc(doc(db, 'users', parsed.uid), {
@@ -319,16 +292,9 @@ export default function App() {
     if (!userProfile) return;
     const savedEmail = (localStorage.getItem('ft_active_email') || '').toLowerCase();
     const authEmail = (auth.currentUser?.email || '').toLowerCase();
-    const uname = (userProfile.username || '').toLowerCase();
-    const dname = (userProfile.displayName || '').toLowerCase();
-    if (
-      authEmail === SUPER_ADMIN_EMAIL ||
-      savedEmail === SUPER_ADMIN_EMAIL ||
-      uname === 'franzatuel' ||
-      uname.includes('franz') ||
-      dname.includes('franz atuel') ||
-      userProfile.uid === 'aMVdQVuMuYMISlIcFuafEA8l8v53'
-    ) {
+    // Owner = the verified owner email only. Names are NOT used, so nobody can
+    // become Owner just by registering a username that looks like the owner's.
+    if (authEmail === SUPER_ADMIN_EMAIL || savedEmail === SUPER_ADMIN_EMAIL) {
       setIsSuperAdmin(true);
     }
   }, [userProfile]);
@@ -1462,27 +1428,6 @@ export default function App() {
     );
   }, [room, approvedMembers]);
 
-  const makeRosterRows = (type: 'add' | 'subtract' = 'add', category: string = CATEGORIES[0]) =>
-    rosterPeople.map((p) =>
-      newBatchRow({ contributorUid: p.uid, contributorName: p.name, type, category })
-    );
-
-  // Open the entry popup. If nothing has been typed yet, pre-fill one row per person in the room.
-  const openEntryModal = () => {
-    setEntryError('');
-    setBatchRows((rows) => {
-      const untouched = rows.every((r) => !r.amount && !r.title && !r.note && (r.contributorUid || !r.contributorName));
-      if (!untouched || rosterPeople.length === 0) return rows;
-      return makeRosterRows(rows[0]?.type, rows[0]?.category).slice(0, MAX_BATCH_ROWS);
-    });
-    setEntryPanelOpen(true);
-  };
-
-  const closeEntryModal = () => {
-    setEntryPanelOpen(false);
-    if (editingEntryId) cancelEditEntry();
-  };
-
   const updateBatchRow = (key: string, patch: Partial<BatchRow>) =>
     setBatchRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
 
@@ -1586,7 +1531,6 @@ export default function App() {
         await batch.commit();
       }
       setBatchRows([newBatchRow()]);
-      setEntryPanelOpen(false);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `rooms/${room.id}/entries`);
     } finally {
@@ -1700,7 +1644,6 @@ export default function App() {
     setEntryNote(entry.note);
     setEntryContributorUid(entry.contributorUid);
     setEntryContributorName(entry.contributorName);
-    setEntryPanelOpen(false);
     setActiveTab('dashboard');
   };
 
@@ -1899,6 +1842,110 @@ export default function App() {
     [myContributions]
   );
 
+  // Real-time member balances map (auto add or subtract for same assigned student/member)
+  const memberBalanceMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    entries.forEach((e) => {
+      const amt = Number(e.amount) || 0;
+      const signed = e.type === 'add' ? amt : -amt;
+      if (e.contributorUid) {
+        map[e.contributorUid] = (map[e.contributorUid] || 0) + signed;
+      }
+      if (e.contributorName && e.contributorName.trim()) {
+        const norm = e.contributorName.trim().toLowerCase();
+        map[norm] = (map[norm] || 0) + signed;
+      }
+    });
+    return map;
+  }, [entries]);
+
+  // Aggregated Member Balance Records for Dashboard and Summary
+  const memberSummaries = useMemo(() => {
+    const map = new Map<string, {
+      key: string;
+      uid: string;
+      name: string;
+      role: RoleType;
+      totalAdded: number;
+      totalSubtracted: number;
+      finalBalance: number;
+      entryCount: number;
+      lastDate: string;
+    }>();
+
+    // Seed with room members
+    members.forEach((m) => {
+      map.set(m.uid, {
+        key: m.uid,
+        uid: m.uid,
+        name: m.username,
+        role: m.role,
+        totalAdded: 0,
+        totalSubtracted: 0,
+        finalBalance: 0,
+        entryCount: 0,
+        lastDate: '—',
+      });
+    });
+
+    // Aggregate from entries
+    entries.forEach((e) => {
+      let key = e.contributorUid;
+      let name = e.contributorName || 'Member';
+      let role: RoleType = 'student';
+
+      if (key && map.has(key)) {
+        const existing = map.get(key)!;
+        name = existing.name;
+        role = existing.role;
+      } else if (!key && e.contributorName && e.contributorName.trim()) {
+        const trimmed = e.contributorName.trim();
+        const found = members.find((m) => m.username.toLowerCase() === trimmed.toLowerCase());
+        if (found) {
+          key = found.uid;
+          name = found.username;
+          role = found.role;
+        } else {
+          key = `name_${trimmed.toLowerCase()}`;
+          name = trimmed;
+        }
+      }
+
+      if (key) {
+        if (!map.has(key)) {
+          map.set(key, {
+            key,
+            uid: key.startsWith('name_') ? '' : key,
+            name,
+            role,
+            totalAdded: 0,
+            totalSubtracted: 0,
+            finalBalance: 0,
+            entryCount: 0,
+            lastDate: '—',
+          });
+        }
+        const record = map.get(key)!;
+        const amt = Number(e.amount) || 0;
+        record.entryCount++;
+        if (e.type === 'add') {
+          record.totalAdded += amt;
+        } else {
+          record.totalSubtracted += amt;
+        }
+        record.finalBalance = record.totalAdded - record.totalSubtracted;
+        if (record.lastDate === '—' || e.entryDate > record.lastDate) {
+          record.lastDate = e.entryDate;
+        }
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (b.entryCount !== a.entryCount) return b.entryCount - a.entryCount;
+      return a.name.localeCompare(b.name);
+    });
+  }, [entries, members]);
+
   // Loading state
   if (!authReady) {
     return (
@@ -1913,811 +1960,54 @@ export default function App() {
     return <AuthPortal onAuthenticated={(profile) => setUserProfile(profile)} />;
   }
 
-  // Authenticated but no Room selected -> Room Hub (includes "Me & Data Wipe Settings" section)
+  // Authenticated but no Room selected -> Room Hub
   if (!roomId) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
-        {/* Top Bar Contract: 3 Zones */}
-        <header className="flex items-center justify-between px-6 py-4 bg-white border-b border-slate-200">
-          <a href="/" className="text-lg font-bold tracking-tight text-slate-900">
-            FundTracker Ledger
-          </a>
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-            <a href="#create-room" className="hover:text-slate-900 transition-colors">
-              Create Ledger
-            </a>
-            <a href="#join-room" className="hover:text-slate-900 transition-colors">
-              Join by Room ID
-            </a>
-            <a href="#directory" className="hover:text-slate-900 transition-colors">
-              My Joined Rooms ({myJoinedRooms.length})
-            </a>
-            {canWipeRooms && (
-              <>
-                <a href="#users-directory" className="hover:text-slate-900 transition-colors">
-                  All Users & UIDs ({allUsersDirectory.length})
-                </a>
-                <a href="#me-settings" className="hover:text-slate-900 transition-colors">
-                  Me & Data Wipe
-                </a>
-              </>
-            )}
-          </nav>
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-slate-600 hidden sm:inline">
-              Signed in as <b className="text-slate-900">{myUsername}</b>
-            </span>
-            <button
-              type="button"
-              onClick={handleSignOut}
-              className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap"
-            >
-              Sign Out
-            </button>
-          </div>
-        </header>
-
-        <main className="max-w-6xl w-full mx-auto px-6 py-10 space-y-10">
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-slate-500">
-              Account Identity: {myUsername} · Select or Create a Shared FundTracker Room
-            </p>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
-              Financial Room Workspace
-            </h1>
-          </div>
-
-          {hubError && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
-              {hubError}
-            </div>
-          )}
-
-          {wipeStatusMsg && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 flex items-center justify-between">
-              <span>{wipeStatusMsg}</span>
-              <button
-                type="button"
-                onClick={() => setWipeStatusMsg('')}
-                className="text-emerald-700 hover:underline ml-4"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-
-          <div className="grid md:grid-cols-2 gap-8">
-            {/* Create New Room */}
-            <section
-              id="create-room"
-              className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
-            >
-              <div className="space-y-1">
-                <h2 className="text-base font-bold text-slate-900">
-                  01. Create New FundTracker Room
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Initialize a shared ledger calendar and choose your starting Point of View (POV).
-                </p>
-              </div>
-
-              <form onSubmit={handleCreateRoom} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Room / Organization Name
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={80}
-                    value={newRoomName}
-                    onChange={(e) => setNewRoomName(e.target.value)}
-                    placeholder="e.g. CS Student Council FY 2026"
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Default Currency
-                    </label>
-                    <select
-                      value={newRoomCurrency}
-                      onChange={(e) => setNewRoomCurrency(e.target.value as CurrencySymbol)}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                    >
-                      {CURRENCIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c} Currency
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Your Starting POV Role
-                    </label>
-                    <select
-                      value={newRoomInitialRole}
-                      onChange={(e) => setNewRoomInitialRole(e.target.value as RoleType)}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                    >
-                      <option value="treasurer">Treasurer (Manage Funds)</option>
-                      <option value="auditor">Auditor (Verify Ledger)</option>
-                      <option value="student">Student (Monitor & Reports)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={hubBusy}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium text-sm rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
-                >
-                  <span>
-                    {hubBusy ? 'Creating Room…' : 'Create Financial Dashboard'}
-                  </span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
-              </form>
-            </section>
-
-            {/* Join Existing Room */}
-            <section
-              id="join-room"
-              className="bg-white border border-slate-200 rounded-xl p-6 space-y-5 flex flex-col justify-between"
-            >
-              <div className="space-y-4">
-                <div className="space-y-1">
-                  <h2 className="text-base font-bold text-slate-900">
-                    02. Join Existing Room by Code
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Enter a room code shared by your Treasurer or classmate to join as Treasurer, Auditor, or Student.
-                  </p>
-                </div>
-
-                <form onSubmit={handleJoinByCode} className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Room Code
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={joinRoomCode}
-                      onChange={(e) => setJoinRoomCode(e.target.value)}
-                      placeholder="e.g. k9m4x2p8"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-900"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={hubBusy}
-                    className="w-full py-2.5 px-4 bg-white border border-slate-300 hover:bg-slate-50 text-slate-900 font-medium text-sm rounded-lg transition-colors whitespace-nowrap"
-                  >
-                    Open Room Dashboard
-                  </button>
-                </form>
-              </div>
-
-              <div className="border-t border-slate-100 pt-4 text-xs text-slate-500 space-y-1">
-                <div className="font-medium text-slate-700">Role Permissions Summary</div>
-                <p>
-                  Treasurer manages funds and authorizes the Auditor. Auditor verifies expenses and edits when authorized. Students view the live dashboard and download personal contribution reports.
-                </p>
-              </div>
-            </section>
-          </div>
-
-          {/* Active Shared Rooms Directory (STRICTLY ONLY ROOMS THE USER HAS JOINED) */}
-          <section
-            id="directory"
-            className="bg-white border border-slate-200 rounded-xl p-6 space-y-4"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">
-                  03. Active Shared FundTracker Rooms (Joined by You)
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Displays only the FundTracker rooms you have created, joined by room code, or been added to by a Treasurer or Auditor.
-                </p>
-              </div>
-              <span className="text-xs font-mono text-slate-500 tabular-nums">
-                {myJoinedRooms.length} {myJoinedRooms.length === 1 ? 'joined room' : 'joined rooms'}
-              </span>
-            </div>
-
-            {myJoinedRooms.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
-                You have not joined any rooms yet. Create a new room above or enter a Room Code in "02. Join Existing Room by Code" to request access.
-              </div>
-            ) : (
-              <div className="divide-y divide-slate-200 border-t border-slate-200">
-                {myJoinedRooms.map((r) => {
-                  const jInfo = myJoinedRoomsIndex.find((x) => x.roomId === r.id);
-                  const isPendingJoin =
-                    jInfo?.approvalStatus === 'pending' &&
-                    r.treasurerId !== currentUid &&
-                    r.auditorId !== currentUid;
-                  return (
-                    <div
-                      key={r.id}
-                      className="py-3 flex flex-wrap items-center justify-between gap-4 hover:bg-slate-50/80 px-2 transition-colors"
-                    >
-                      <div className="min-w-0">
-                        <div className="font-semibold text-sm text-slate-900 truncate flex items-center gap-2">
-                          <span>{r.name}</span>
-                          {isPendingJoin ? (
-                            <span className="text-[11px] font-medium text-amber-700 flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              <span>Waiting for Treasurer/Auditor Approval</span>
-                            </span>
-                          ) : (
-                            <span className="text-[11px] font-medium text-emerald-700 flex items-center gap-1">
-                              <CheckCircle2 className="w-3 h-3" />
-                              <span>Verified Member</span>
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5">
-                          <span className="font-mono">ID: {r.id}</span>
-                          <span>·</span>
-                          <span>Currency: {r.currency}</span>
-                          <span>·</span>
-                          <span>Treasurer: {r.treasurerName || 'Vacant'}</span>
-                          <span>·</span>
-                          <span>Auditor: {r.auditorName || 'Vacant'}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {canWipeRooms && (
-                          <button
-                            type="button"
-                            disabled={wipeBusy}
-                            onClick={() => handleDeleteSpecificRoom(r.id)}
-                            className="px-2.5 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors whitespace-nowrap flex items-center gap-1 disabled:opacity-50"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>Delete Room</span>
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => navigateToRoom(r.id)}
-                          className="px-3 py-1.5 text-xs font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap"
-                        >
-                          {isPendingJoin ? 'Check Approval Status' : 'Enter Room'}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {canWipeRooms && (
-          <>
-          {/* 04. REGISTERED USERS & AUTHORITY DIRECTORY (ADMINS / AUTHORIZED USERS ONLY) */}
-          <section
-            id="users-directory"
-            className="bg-white border border-slate-200 rounded-xl p-6 space-y-5"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Users className="w-4 h-4 text-slate-700" />
-                  <span>04. All Registered Usernames & Authority Directory ({allUsersDirectory.length})</span>
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Shows every registered username across the entire FundTracker database. {canWipeRooms ? 'Click "Give Same Authority" next to any username so they get the exact same authority as you and can also grant it to others.' : 'Copy any @username or UID to add teammates.'}
-                </p>
-              </div>
-              <div className="relative w-full sm:w-72">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={userDirSearch}
-                  onChange={(e) => setUserDirSearch(e.target.value)}
-                  placeholder="Search @username, display name, or UID…"
-                  className="w-full border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-slate-900"
-                />
-              </div>
-            </div>
-
-            {grantError && (
-              <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
-                {grantError}
-              </div>
-            )}
-            {grantSuccess && (
-              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800">
-                {grantSuccess}
-              </div>
-            )}
-
-            {filteredUsersDirectory.length === 0 ? (
-              <div className="py-8 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
-                No matching user accounts found.
-              </div>
-            ) : (
-              <div className="divide-y divide-slate-200 border-t border-slate-200 max-h-96 overflow-y-auto">
-                {filteredUsersDirectory.map((u) => {
-                  const isMe = u.uid === userProfile.uid;
-                  const isPrimaryOwnerUser =
-                    u.username.toLowerCase() === 'franzatuel' ||
-                    u.username.toLowerCase().includes('franz') ||
-                    u.uid === 'aMVdQVuMuYMISlIcFuafEA8l8v53';
-                  const isWipeAuth =
-                    isPrimaryOwnerUser ||
-                    wipeAuthorities.some(
-                      (w) =>
-                        w.uid === u.uid ||
-                        w.username.toLowerCase() === u.username.toLowerCase()
-                    );
-                  return (
-                    <div
-                      key={u.uid}
-                      className="py-3 px-2 flex flex-wrap items-center justify-between gap-3 hover:bg-slate-50/80 transition-colors text-xs"
-                    >
-                      <div className="min-w-0 space-y-0.5">
-                        <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-sm font-bold text-slate-900">
-                            @{u.username}
-                          </span>
-                          <span className="text-slate-600">({u.displayName})</span>
-                          {isMe && (
-                            <span className="text-emerald-700 font-semibold">(You)</span>
-                          )}
-                          {isWipeAuth && (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-800">
-                              <ShieldCheck className="w-3 h-3 text-emerald-600" />
-                              <span>
-                                {isPrimaryOwnerUser
-                                  ? 'Primary Owner Authority'
-                                  : 'Has Full Authority (Can Wipe & Grant)'}
-                              </span>
-                            </span>
-                          )}
-                        </div>
-                        <div className="font-mono text-slate-500 select-all">
-                          UID: {u.uid}
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleCopyUserIdentifier(u.username, `usr_${u.uid}`)
-                          }
-                          className="px-2.5 py-1 border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700 font-medium flex items-center gap-1"
-                        >
-                          {copiedDirectoryUid === `usr_${u.uid}` ? (
-                            <Check className="w-3 h-3 text-emerald-600" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                          <span>
-                            {copiedDirectoryUid === `usr_${u.uid}`
-                              ? 'Copied @username'
-                              : 'Copy @username'}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleCopyUserIdentifier(u.uid, `uid_${u.uid}`)}
-                          className="px-2.5 py-1 border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700 font-mono flex items-center gap-1"
-                        >
-                          {copiedDirectoryUid === `uid_${u.uid}` ? (
-                            <Check className="w-3 h-3 text-emerald-600" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                          <span>
-                            {copiedDirectoryUid === `uid_${u.uid}`
-                              ? 'Copied UID'
-                              : 'Copy UID'}
-                          </span>
-                        </button>
-                        {canWipeRooms && !isMe && !isPrimaryOwnerUser && (
-                          <button
-                            type="button"
-                            disabled={grantBusy}
-                            onClick={() =>
-                              isWipeAuth
-                                ? handleRevokeWipeAuthority(u.uid, u.displayName)
-                                : handleGrantWipeAuthority(u)
-                            }
-                            className={`px-3 py-1 rounded-lg font-semibold transition-colors ${
-                              isWipeAuth
-                                ? 'border border-red-200 text-red-600 hover:bg-red-50'
-                                : 'bg-slate-900 text-white hover:bg-slate-800'
-                            }`}
-                          >
-                            {isWipeAuth ? 'Revoke Authority' : 'Give Same Authority'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-          </>
-          )}
-
-          {canWipeRooms && (
-          <>
-          {/* 05. AUTHORITY CONTROL CENTER (ADMINS / AUTHORIZED USERS ONLY) */}
-          <section
-            id="me-settings"
-            className="bg-white border border-slate-200 rounded-xl p-6 space-y-6"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4">
-              <div className="space-y-1">
-                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Settings className="w-4 h-4 text-slate-700" />
-                  <span>05. Main Website Authority Control Center & Data Wipe</span>
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Manage who holds full authority on FundTracker, view all authorized users, inspect all rooms across the website, and wipe room data clean.
-                </p>
-              </div>
-              <div className="text-xs text-slate-600 font-mono">
-                @{userProfile.username} · Authority:{' '}
-                <b className={canWipeRooms ? 'text-emerald-700' : 'text-slate-600'}>
-                  {isSuperAdmin
-                    ? 'Primary Owner (Full Authority)'
-                    : canWipeRooms
-                    ? 'Granted Full Authority (Same as Owner)'
-                    : 'Standard Member (Locked)'}
-                </b>
-              </div>
-            </div>
-
-            <div className="grid md:grid-cols-2 gap-6 items-start">
-              <div className="space-y-3">
-                <div className="text-sm font-semibold text-slate-900">
-                  Your Account Profile & Authority Status
-                </div>
-                <div className="text-xs text-slate-600 space-y-1.5">
-                  <div>
-                    Display Name: <b className="text-slate-900">{myUsername}</b>
-                  </div>
-                  <div>
-                    Username: <b className="text-slate-900 font-mono">@{userProfile.username}</b>
-                  </div>
-                  <div>
-                    Account UID:{' '}
-                    <span className="font-mono text-slate-900 select-all">
-                      {userProfile.uid}
-                    </span>
-                  </div>
-                  <div>
-                    Authority Level:{' '}
-                    {canWipeRooms ? (
-                      <b className="text-emerald-700">
-                        {isSuperAdmin
-                          ? `Primary Owner (${SUPER_ADMIN_EMAIL}) — Full Authority`
-                          : 'Granted Same Authority as Owner — Can Wipe Rooms & Grant Authority'}
-                      </b>
-                    ) : (
-                      <b className="text-slate-600">
-                        Standard Member (Ask Owner or an Authorized User to grant you Authority)
-                      </b>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {canWipeRooms ? (
-                <div className="p-4 rounded-xl border border-red-200 bg-red-50/50 space-y-3">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <div className="text-sm font-bold text-red-900">
-                        Clean Start — Wipe All Rooms & Ledger Data
-                      </div>
-                      <p className="text-xs text-red-800 leading-relaxed">
-                        Authorized Access: Permanently deletes all {publicRooms.length}{' '}
-                        {publicRooms.length === 1 ? 'room' : 'rooms'}, every financial ledger entry, and all room member rosters in Firestore.
-                      </p>
-                    </div>
-                  </div>
-
-                  {!confirmWipeAllRooms ? (
-                    <button
-                      type="button"
-                      disabled={wipeBusy || publicRooms.length === 0}
-                      onClick={() => setConfirmWipeAllRooms(true)}
-                      className="w-full py-2 px-4 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>
-                        Wipe All Rooms & Data ({publicRooms.length}{' '}
-                        {publicRooms.length === 1 ? 'Room' : 'Rooms'})
-                      </span>
-                    </button>
-                  ) : (
-                    <div className="space-y-2 pt-1">
-                      <div className="text-xs font-semibold text-red-900">
-                        Confirm permanent deletion of all {publicRooms.length} rooms and their data?
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={wipeBusy}
-                          onClick={handleWipeAllRoomsData}
-                          className="flex-1 py-2 px-3 bg-red-700 hover:bg-red-800 text-white text-xs font-semibold rounded-lg transition-colors"
-                        >
-                          {wipeBusy ? 'Wiping All Data…' : 'Yes, Wipe Everything Clean'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={wipeBusy}
-                          onClick={() => setConfirmWipeAllRooms(false)}
-                          className="py-2 px-3 bg-white border border-slate-300 text-slate-700 text-xs font-medium rounded-lg hover:bg-slate-50"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
-                  <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                    <Lock className="w-4 h-4 text-slate-600" />
-                    <span>Wipe All Rooms — Restricted Authority</span>
-                  </div>
-                  <p className="text-xs text-slate-600 leading-relaxed">
-                    Only the Primary Owner (<b>{SUPER_ADMIN_EMAIL}</b>) and teammates given the same Authority can wipe rooms or grant authority. Share your username (<b>@{userProfile.username}</b>) or UID (<b>{userProfile.uid}</b>) with the owner or an authorized member to receive authority.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* VISIBLE TO EVERYONE: LIST OF ALL USERS GIVEN THE SAME AUTHORITY + AUTHORITY CONSOLE FOR AUTHORIZED USERS */}
-            <div className="border-t border-slate-200 pt-6 space-y-5">
-              <div className="space-y-1">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>
-                    Users Given Full Authority ({wipeAuthorities.length + 1}) & Authority Console
-                  </span>
-                </h3>
-                <p className="text-xs text-slate-500">
-                  {canWipeRooms
-                    ? 'You have Full Authority. You can grant the exact same authority to any registered username below, and anyone you authorize can also grant authority and manage/wipe all rooms.'
-                    : 'List of accounts holding Full Authority to manage/wipe rooms and grant authority on FundTracker.'}
-                </p>
-              </div>
-
-              {canWipeRooms && (
-                <form onSubmit={handleGrantByInput} className="flex flex-wrap gap-2">
-                  <input
-                    type="text"
-                    value={grantIdentifier}
-                    onChange={(e) => setGrantIdentifier(e.target.value)}
-                    placeholder="Enter any @username or UID to give them the same authority…"
-                    className="flex-1 min-w-[240px] border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                  <button
-                    type="submit"
-                    disabled={grantBusy}
-                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
-                  >
-                    {grantBusy ? 'Updating Authority…' : 'Give Same Authority'}
-                  </button>
-                </form>
-              )}
-
-              <div className="grid md:grid-cols-2 gap-6">
-                {/* Roster of Everyone Given the Same Authority */}
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-slate-700">
-                    All Accounts With Full Authority ({wipeAuthorities.length + 1})
-                  </div>
-                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg bg-slate-50/50 max-h-72 overflow-y-auto">
-                    <div className="p-3 flex items-center justify-between text-xs">
-                      <div>
-                        <div className="font-semibold text-slate-900">
-                          Primary Owner ({SUPER_ADMIN_EMAIL})
-                        </div>
-                        <div className="text-slate-500">
-                          Permanent Full Authority · Can Wipe Rooms & Grant Authority
-                        </div>
-                      </div>
-                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">
-                        Owner
-                      </span>
-                    </div>
-                    {wipeAuthorities.map((wa) => (
-                      <div
-                        key={wa.uid}
-                        className="p-3 flex items-center justify-between gap-2 text-xs"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-semibold text-slate-900 truncate">
-                            @{wa.username} ({wa.displayName})
-                          </div>
-                          <div className="text-slate-500 font-mono truncate">
-                            UID: {wa.uid} · Granted by: {wa.grantedByEmail}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold whitespace-nowrap">
-                            Same Authority
-                          </span>
-                          {canWipeRooms && wa.uid !== userProfile.uid && (
-                            <button
-                              type="button"
-                              disabled={grantBusy}
-                              onClick={() =>
-                                handleRevokeWipeAuthority(wa.uid, wa.displayName)
-                              }
-                              className="px-2.5 py-1 bg-white border border-red-200 text-red-600 hover:bg-red-50 rounded font-medium whitespace-nowrap"
-                            >
-                              Revoke
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Quick-Grant from All Registered Usernames */}
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-slate-700">
-                    All Registered Usernames ({allUsersDirectory.length}) — Quick Authority Access
-                  </div>
-                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg max-h-72 overflow-y-auto">
-                    {allUsersDirectory.length === 0 ? (
-                      <div className="p-4 text-center text-xs text-slate-400">
-                        No registered user profiles found.
-                      </div>
-                    ) : (
-                      allUsersDirectory.map((u) => {
-                        const isPrimaryOwnerUser =
-                          u.username.toLowerCase() === 'franzatuel' ||
-                          u.username.toLowerCase().includes('franz') ||
-                          u.uid === 'aMVdQVuMuYMISlIcFuafEA8l8v53';
-                        const isAlreadyAuthorized =
-                          isPrimaryOwnerUser ||
-                          wipeAuthorities.some(
-                            (w) =>
-                              w.uid === u.uid ||
-                              w.username.toLowerCase() === u.username.toLowerCase()
-                          );
-                        const isSelf = u.uid === userProfile.uid;
-                        return (
-                          <div
-                            key={u.uid}
-                            className="p-2.5 flex items-center justify-between gap-2 text-xs"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-semibold text-slate-900 truncate">
-                                <span className="font-mono font-bold">@{u.username}</span> ({u.displayName}){' '}
-                                {isSelf ? '(You)' : ''}
-                              </div>
-                              <div className="text-slate-400 font-mono truncate">
-                                UID: {u.uid}
-                              </div>
-                            </div>
-                            {isPrimaryOwnerUser ? (
-                              <span className="text-emerald-700 font-semibold">Owner</span>
-                            ) : isAlreadyAuthorized ? (
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-emerald-700 font-semibold">Authorized</span>
-                                {canWipeRooms && !isSelf && (
-                                  <button
-                                    type="button"
-                                    disabled={grantBusy}
-                                    onClick={() =>
-                                      handleRevokeWipeAuthority(u.uid, u.displayName)
-                                    }
-                                    className="px-2.5 py-1 border border-red-200 text-red-600 hover:bg-red-50 rounded font-medium whitespace-nowrap"
-                                  >
-                                    Revoke
-                                  </button>
-                                )}
-                              </div>
-                            ) : canWipeRooms ? (
-                              <button
-                                type="button"
-                                disabled={grantBusy}
-                                onClick={() => handleGrantWipeAuthority(u)}
-                                className="px-2.5 py-1 bg-slate-900 text-white hover:bg-slate-800 rounded font-semibold whitespace-nowrap"
-                              >
-                                Give Same Authority
-                              </button>
-                            ) : (
-                              <span className="text-slate-400">Member</span>
-                            )}
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* ALL WEBSITE ROOMS AUTHORITY OVERVIEW (VISIBLE TO OWNER & THOSE GIVEN THE SAME AUTHORITY) */}
-              {canWipeRooms && (
-                <div className="border-t border-slate-200 pt-5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                        All FundTracker Website Rooms — Authority Management ({publicRooms.length})
-                      </h4>
-                      <p className="text-xs text-slate-500">
-                        Visible to you and everyone given the same authority so you can inspect, open, or delete any room on the website.
-                      </p>
-                    </div>
-                  </div>
-                  {publicRooms.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
-                      No rooms currently exist in the database.
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg max-h-60 overflow-y-auto">
-                      {publicRooms.map((r) => (
-                        <div
-                          key={r.id}
-                          className="p-3 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50"
-                        >
-                          <div>
-                            <div className="font-semibold text-slate-900">
-                              {r.name}{' '}
-                              <span className="font-mono text-slate-500">(ID: {r.id})</span>
-                            </div>
-                            <div className="text-slate-500">
-                              Treasurer: {r.treasurerName || 'Vacant'} · Auditor:{' '}
-                              {r.auditorName || 'Vacant'} · Currency: {r.currency}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => navigateToRoom(r.id)}
-                              className="px-2.5 py-1 bg-slate-900 text-white rounded font-medium hover:bg-slate-800"
-                            >
-                              Open Room
-                            </button>
-                            <button
-                              type="button"
-                              disabled={wipeBusy}
-                              onClick={() => handleDeleteSpecificRoom(r.id)}
-                              className="px-2.5 py-1 border border-red-200 text-red-600 rounded font-medium hover:bg-red-50 flex items-center gap-1"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              <span>Delete</span>
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </section>
-          </>
-          )}
-        </main>
-
-        <footer className="border-t border-slate-200 bg-white px-6 py-4 text-xs text-slate-500 flex items-center justify-between">
-          <span>FundTracker Ledger</span>
-          <span>Signed in as {myUsername}</span>
-        </footer>
-      </div>
+      <RoomHub
+        userProfile={userProfile}
+        myJoinedRooms={myJoinedRooms}
+        myJoinedRoomsIndex={myJoinedRoomsIndex}
+        publicRooms={publicRooms}
+        allUsersDirectory={allUsersDirectory}
+        filteredUsersDirectory={filteredUsersDirectory}
+        userDirSearch={userDirSearch}
+        setUserDirSearch={setUserDirSearch}
+        copiedDirectoryUid={copiedDirectoryUid}
+        onCopyIdentifier={handleCopyUserIdentifier}
+        newRoomName={newRoomName}
+        setNewRoomName={setNewRoomName}
+        newRoomCurrency={newRoomCurrency}
+        setNewRoomCurrency={setNewRoomCurrency}
+        newRoomInitialRole={newRoomInitialRole}
+        setNewRoomInitialRole={setNewRoomInitialRole}
+        joinRoomCode={joinRoomCode}
+        setJoinRoomCode={setJoinRoomCode}
+        hubError={hubError}
+        hubBusy={hubBusy}
+        onCreateRoom={handleCreateRoom}
+        onJoinByCode={handleJoinByCode}
+        onNavigateToRoom={navigateToRoom}
+        onSignOut={handleSignOut}
+        canWipeRooms={canWipeRooms}
+        wipeBusy={wipeBusy}
+        wipeAuthorities={wipeAuthorities}
+        grantIdentifier={grantIdentifier}
+        setGrantIdentifier={setGrantIdentifier}
+        grantBusy={grantBusy}
+        grantError={grantError}
+        grantSuccess={grantSuccess}
+        onGrantByInput={handleGrantByInput}
+        onGrantWipeAuthority={handleGrantWipeAuthority}
+        onRevokeWipeAuthority={handleRevokeWipeAuthority}
+        onDeleteRoom={handleDeleteSpecificRoom}
+        onWipeAllRooms={handleWipeAllRoomsData}
+        confirmWipeAllRooms={confirmWipeAllRooms}
+        setConfirmWipeAllRooms={setConfirmWipeAllRooms}
+        wipeStatusMsg={wipeStatusMsg}
+        setWipeStatusMsg={setWipeStatusMsg}
+        superAdminEmail={SUPER_ADMIN_EMAIL}
+        currencies={CURRENCIES}
+      />
     );
   }
 
@@ -2939,39 +2229,59 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Top Bar Contract: 3 Zones */}
+      {/* Top Bar Contract (3 Zones) */}
       <header className="flex items-center justify-between px-6 py-3.5 bg-white border-b border-slate-200 sticky top-0 z-20">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="/"
-          onClick={(e) => {
-            e.preventDefault();
-            navigateToRoom(null);
-          }}
-          className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap"
-        >
-          FundTracker Ledger
-        </a>
+        {/* Zone 1: Wordmark & Room Identity */}
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            type="button"
+            onClick={() => navigateToRoom(null)}
+            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-xs shrink-0"
+            title="Return to My Rooms"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            <span className="hidden sm:inline font-medium">Rooms</span>
+          </button>
+          <div className="h-4 w-px bg-slate-200 shrink-0" />
+          <div className="min-w-0 flex items-center gap-2">
+            <span className="text-base font-bold tracking-tight text-slate-900 truncate max-w-[180px] sm:max-w-[260px]">
+              {room.name}
+            </span>
+            <button
+              type="button"
+              onClick={() => handleCopyUserIdentifier(room.id, 'room_id')}
+              className="hidden sm:inline-flex items-center gap-1 font-mono text-[11px] text-slate-500 hover:text-slate-800 bg-slate-100 px-2 py-0.5 rounded-md transition-colors"
+              title="Click to copy Room Code"
+            >
+              <span>{copiedDirectoryUid === 'room_id' ? 'Copied' : room.id}</span>
+              {copiedDirectoryUid === 'room_id' ? (
+                <Check className="w-3 h-3 text-emerald-600" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+            </button>
+          </div>
+        </div>
 
-        {/* Zone 2: 5 clean navigation links including "Me" settings */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+        {/* Zone 2: Navigation Links (Clean Single-Line) */}
+        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-600">
           <button
             type="button"
             onClick={() => setActiveTab('dashboard')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap ${
               activeTab === 'dashboard'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                ? 'text-slate-900 font-semibold underline underline-offset-8 decoration-2'
                 : ''
             }`}
           >
-            Calendar & Ledger
+            Ledger & Calendar
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('verification')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap ${
               activeTab === 'verification'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                ? 'text-slate-900 font-semibold underline underline-offset-8 decoration-2'
                 : ''
             }`}
           >
@@ -2982,186 +2292,166 @@ export default function App() {
             onClick={() => setActiveTab('student_reports')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap ${
               activeTab === 'student_reports'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                ? 'text-slate-900 font-semibold underline underline-offset-8 decoration-2'
                 : ''
             }`}
           >
-            My Contributions ({myContributions.length})
+            Member Balances ({memberSummaries.length})
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('governance')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap ${
               activeTab === 'governance'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                ? 'text-slate-900 font-semibold underline underline-offset-8 decoration-2'
                 : ''
             }`}
           >
-            Roles & Approvals{pendingMembers.length > 0 ? ` (${pendingMembers.length})` : ''}
+            Members{pendingMembers.length > 0 ? ` (${pendingMembers.length} Pending)` : ''}
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('me_settings')}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap ${
               activeTab === 'me_settings'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2'
+                ? 'text-slate-900 font-semibold underline underline-offset-8 decoration-2'
                 : ''
             }`}
           >
-            Me
+            Settings
           </button>
         </nav>
 
-        {/* Zone 3: 2 primary actions */}
-        <div className="flex items-center gap-2.5">
+        {/* Zone 3: Primary Actions */}
+        <div className="flex items-center gap-2">
+          {canModifyExpenses && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingEntryId(null);
+                setEntryPanelOpen(true);
+              }}
+              className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1.5 shadow-xs whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Log Entry</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleCopyInvite}
-            className="px-3 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap flex items-center gap-1.5"
+            className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors whitespace-nowrap flex items-center gap-1.5"
+            title="Copy invitation link"
           >
-            {copiedLink ? (
-              <Check className="w-3.5 h-3.5" />
-            ) : (
-              <Copy className="w-3.5 h-3.5" />
-            )}
-            <span>{copiedLink ? 'Link Copied' : 'Invite Link'}</span>
+            {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{copiedLink ? 'Link Copied' : 'Invite'}</span>
           </button>
+
           <button
             type="button"
             onClick={handleSignOut}
-            className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap flex items-center gap-1"
+            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+            title="Sign Out"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Sign Out</span>
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </header>
 
-      {/* Contextual Subbar: Room Metadata, Read-Only POV Viewer Tab (for Treasurer/Auditor) & Student Locked Indicator */}
-      <div className="bg-white border-b border-slate-200 px-6 py-3">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          {/* Unboxed Metadata with typographic separators */}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-            <span className="font-semibold text-slate-900">{room.name}</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono">Room ID: {room.id}</span>
-            <span aria-hidden="true">·</span>
-            <span>
-              User: <b className="text-slate-900">{myUsername}</b>
+      {/* Contextual Sub-bar: Compact single line with Role, POV Switcher, Currency & Auditor Authorization */}
+      <div className="bg-white border-b border-slate-200 px-6 py-2.5">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+          {/* Identity & Status */}
+          <div className="flex flex-wrap items-center gap-2 text-slate-600">
+            <span className="font-semibold text-slate-900">@{myUsername}</span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span className="inline-flex items-center gap-1 font-medium capitalize text-slate-800">
+              {myRole === 'treasurer' && <Wallet className="w-3.5 h-3.5 text-emerald-600" />}
+              {myRole === 'auditor' && <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />}
+              {myRole === 'student' && <GraduationCap className="w-3.5 h-3.5 text-slate-600" />}
+              <span>{myRole}</span>
             </span>
-            <span aria-hidden="true">·</span>
-            <span>
-              Assigned Role: <b className="text-slate-900 capitalize">{myRole}</b>
-            </span>
-            {!isStudent && (
+
+            {isTreasurer && (
               <>
-                <span aria-hidden="true">·</span>
-                <span>
-                  Viewing POV:{' '}
-                  <b className="text-emerald-700 capitalize">
-                    {activeViewedPov}
-                    {isPreviewingOtherPov ? ' (View Only — Role Not Transferred)' : ''}
-                  </b>
-                </span>
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <span className="text-slate-500">Currency:</span>
+                <select
+                  value={symbol}
+                  onChange={(e) => handleCurrencyChange(e.target.value as CurrencySymbol)}
+                  className="border border-slate-200 rounded px-1.5 py-0.5 text-xs font-medium bg-white focus:outline-none"
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+
+                <span aria-hidden="true" className="text-slate-300">·</span>
+                <button
+                  type="button"
+                  onClick={handleToggleAuditorAuth}
+                  className={`hover:underline font-medium inline-flex items-center gap-1 ${
+                    room.auditorCanModify ? 'text-emerald-700' : 'text-slate-600'
+                  }`}
+                >
+                  {room.auditorCanModify ? <Unlock className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                  <span>Auditor Edit: {room.auditorCanModify ? 'Authorized' : 'Locked'}</span>
+                </button>
               </>
             )}
-            <span aria-hidden="true">·</span>
-            <span>
-              Auditor Edit Access:{' '}
-              <b
-                className={
-                  room.auditorCanModify ? 'text-emerald-700' : 'text-slate-600'
-                }
-              >
-                {room.auditorCanModify
-                  ? 'Authorized by Treasurer'
-                  : 'Verify-Only (Locked)'}
-              </b>
-            </span>
           </div>
 
-          {/* POV Viewer Tab (ONLY for Treasurer/Auditor to VIEW without transferring role; Students are locked to Student View Only) */}
-          <div className="flex flex-wrap items-center gap-3">
-            {isTreasurer && activeViewedPov === 'treasurer' && (
-              <button
-                type="button"
-                onClick={handleToggleAuditorAuth}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-                  room.auditorCanModify
-                    ? 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:bg-emerald-100'
-                    : 'bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                {room.auditorCanModify ? (
-                  <>
-                    <Unlock className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Auditor Authorized to Edit (Revoke)</span>
-                  </>
-                ) : (
-                  <>
-                    <Lock className="w-3.5 h-3.5 text-slate-600" />
-                    <span>Authorize Auditor to Modify Expenses</span>
-                  </>
-                )}
-              </button>
-            )}
-
-            {isStudent ? (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-xs font-medium text-slate-700">
-                <GraduationCap className="w-3.5 h-3.5 text-slate-600" />
-                <span>Student POV (View-Only — Other POVs Locked)</span>
+          {/* POV Preview Selector (Treasurer/Auditor Only) */}
+          {!isStudent ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-slate-400">View POV:</span>
+              <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setViewedPov('treasurer')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    activeViewedPov === 'treasurer'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Treasurer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewedPov('auditor')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    activeViewedPov === 'auditor'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Auditor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewedPov('student')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    activeViewedPov === 'student'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Student
+                </button>
               </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-medium text-slate-500 whitespace-nowrap">
-                  POV Viewer (View Only · Does Not Transfer Role):
-                </span>
-                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => setViewedPov('treasurer')}
-                    title="Preview Treasurer POV (Does not transfer your role)"
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      activeViewedPov === 'treasurer'
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {myRole === 'treasurer' ? 'Treasurer POV (My Role)' : 'View Treasurer POV'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setViewedPov('auditor')}
-                    title="Preview Auditor POV (Does not transfer your role)"
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      activeViewedPov === 'auditor'
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {myRole === 'auditor' ? 'Auditor POV (My Role)' : 'View Auditor POV'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setViewedPov('student')}
-                    title="Preview Student POV (Does not transfer your role)"
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      activeViewedPov === 'student'
-                        ? 'bg-white text-slate-900 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    View Student POV
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="text-[11px] text-slate-400">Student Access · View Only</div>
+          )}
         </div>
       </div>
 
-      {/* Mobile Tab Selector */}
-      <div className="md:hidden bg-white border-b border-slate-200 px-4 py-2 flex items-center gap-1 overflow-x-auto">
+      {/* Mobile Nav Tabs */}
+      <div className="lg:hidden bg-white border-b border-slate-200 px-4 py-2 flex items-center gap-1 overflow-x-auto">
         <button
           type="button"
           onClick={() => setActiveTab('dashboard')}
@@ -3187,7 +2477,7 @@ export default function App() {
             activeTab === 'student_reports' ? 'bg-slate-900 text-white' : 'text-slate-600'
           }`}
         >
-          My Contributions
+          Member Balances
         </button>
         <button
           type="button"
@@ -3196,7 +2486,7 @@ export default function App() {
             activeTab === 'governance' ? 'bg-slate-900 text-white' : 'text-slate-600'
           }`}
         >
-          Roles
+          Members
         </button>
         <button
           type="button"
@@ -3205,22 +2495,45 @@ export default function App() {
             activeTab === 'me_settings' ? 'bg-slate-900 text-white' : 'text-slate-600'
           }`}
         >
-          Me
+          Settings
         </button>
       </div>
 
       {/* Main Content Container */}
       <main className="max-w-7xl w-full mx-auto px-6 py-6 space-y-6 flex-1">
         {wipeStatusMsg && (
-          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 flex items-center justify-between">
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between">
             <span>{wipeStatusMsg}</span>
             <button
               type="button"
               onClick={() => setWipeStatusMsg('')}
-              className="text-emerald-700 hover:underline ml-4"
+              className="text-emerald-700 hover:underline font-medium ml-4"
             >
               Dismiss
             </button>
+          </div>
+        )}
+
+        {/* Temporary POV Preview Banner (Only shown if inspecting another POV) */}
+        {isPreviewingOtherPov && (
+          <div className="p-3 bg-slate-900 text-white rounded-xl text-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold capitalize text-emerald-400">
+                Viewing as {activeViewedPov} POV:
+              </span>
+              <span>
+                You are previewing how {activeViewedPov}s see this room. Your actual role remains {myRole}.
+              </span>
+            </div>
+            {myRole && (
+              <button
+                type="button"
+                onClick={() => setViewedPov(myRole)}
+                className="px-2.5 py-1 bg-white/20 hover:bg-white/30 text-white rounded font-medium text-xs transition-colors"
+              >
+                Reset to My {myRole} View
+              </button>
+            )}
           </div>
         )}
 
@@ -3274,98 +2587,6 @@ export default function App() {
                 <span className="text-emerald-700">0 flagged discrepancies</span>
               )}
             </div>
-          </div>
-        </section>
-
-        {/* POV Status Banner */}
-        <section className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <div className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-              {activeViewedPov === 'treasurer' && (
-                <Wallet className="w-4 h-4 text-emerald-600" />
-              )}
-              {activeViewedPov === 'auditor' && (
-                <ShieldCheck className="w-4 h-4 text-amber-600" />
-              )}
-              {activeViewedPov === 'student' && (
-                <GraduationCap className="w-4 h-4 text-slate-700" />
-              )}
-              <span>
-                {activeViewedPov === 'treasurer' &&
-                  (isTreasurer
-                    ? 'Treasurer Point of View — Full Fund & Expense Management Authority'
-                    : `Viewing Treasurer Point of View (Read-Only Preview · Your Role Remains ${myRole?.toUpperCase()})`)}
-                {activeViewedPov === 'auditor' &&
-                  (isAuditor
-                    ? room.auditorCanModify
-                      ? 'Auditor Point of View — Verification Authority + Treasurer-Authorized Expense Modification'
-                      : 'Auditor Point of View — Verification & Flagging Mode (Expense Modification Locked by Treasurer)'
-                    : `Viewing Auditor Point of View (Read-Only Preview · Your Role Remains ${myRole?.toUpperCase()})`)}
-                {activeViewedPov === 'student' &&
-                  (isStudent
-                    ? 'Student Point of View — Read-Only Dashboard Monitoring & Personal Contribution Reports'
-                    : `Viewing Student Point of View (Read-Only Preview · Your Role Remains ${myRole?.toUpperCase()})`)}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500">
-              {isPreviewingOtherPov && (
-                <span className="text-emerald-700 font-medium">
-                  POV Viewer Mode Active: You are inspecting the {activeViewedPov} perspective without transferring or losing your assigned {myRole} seat.{' '}
-                </span>
-              )}
-              {activeViewedPov === 'treasurer' &&
-                (isTreasurer
-                  ? 'You can add, edit, or delete any fund contribution or expense, change the room currency, and grant or revoke expense modification rights for the Auditor.'
-                  : 'Previewing how the Room Treasurer sees the workspace. Your Auditor role is preserved.')}
-              {activeViewedPov === 'auditor' &&
-                (isAuditor
-                  ? room.auditorCanModify
-                    ? 'The Treasurer has authorized you to add, edit, and delete expenses in addition to verifying and flagging ledger entries.'
-                    : 'You can verify any entry or flag discrepancies with audit notes. Ask the Treasurer to click "Authorize Auditor to Modify Expenses" if you need to add or edit expenses.'
-                  : 'Previewing how the Room Auditor sees the verification controls. Your Treasurer role is preserved.')}
-              {activeViewedPov === 'student' &&
-                (isStudent
-                  ? 'You have read-only access to monitor all class funds and expenses in real time. Students cannot switch to Treasurer or Auditor POVs.'
-                  : 'Previewing how Students view this room (read-only ledger monitoring and personal contribution reports).')}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {isPreviewingOtherPov && myRole && (
-              <button
-                type="button"
-                onClick={() => setViewedPov(myRole)}
-                className="px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors whitespace-nowrap"
-              >
-                Return to My {myRole === 'treasurer' ? 'Treasurer' : 'Auditor'} POV
-              </button>
-            )}
-            {isTreasurer && activeViewedPov === 'treasurer' && (
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="text-slate-500">Currency:</span>
-                <select
-                  value={symbol}
-                  onChange={(e) => handleCurrencyChange(e.target.value as CurrencySymbol)}
-                  className="border border-slate-300 rounded-lg px-2 py-1 text-xs font-medium bg-white"
-                >
-                  {CURRENCIES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-            {activeViewedPov === 'student' && (
-              <button
-                type="button"
-                onClick={() => setActiveTab('student_reports')}
-                className="px-3 py-1.5 text-xs font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap flex items-center gap-1.5"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>View My Contributions Report</span>
-              </button>
-            )}
           </div>
         </section>
 
@@ -3430,7 +2651,7 @@ export default function App() {
                   month={month}
                   entries={entries}
                   selectedDate={selectedDate}
-                  onSelectDate={handleCalendarDateClick}
+                  onSelectDate={setSelectedDate}
                   symbol={symbol}
                 />
 
@@ -3444,414 +2665,33 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Fund & Expense Modification Form (Strictly for Treasurer OR Authorized Auditor) */}
-              {canModifyExpenses ? (
-                <>
-                <div className="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Record Fund Contributions or Expenses</h3>
-                    <p className="text-xs text-slate-500">
-                      Click a date on the calendar, or use the button, to open the entry window for everyone in the room.
-                    </p>
+              {/* Quick Action & Guidelines */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div>
+                  <div className="font-semibold text-slate-900">
+                    {canModifyExpenses ? 'Fund & Expense Logging' : 'Auditor & Student View'}
                   </div>
+                  <div className="text-slate-500">
+                    {canModifyExpenses
+                      ? 'Select any calendar date or click to record contributions or disbursements.'
+                      : 'Real-time ledger stream. Checkmarks indicate auditor-verified entries.'}
+                  </div>
+                </div>
+
+                {canModifyExpenses && (
                   <button
                     type="button"
-                    onClick={openEntryModal}
-                    className="flex items-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium rounded-lg whitespace-nowrap"
+                    onClick={() => {
+                      setEditingEntryId(null);
+                      setEntryPanelOpen(true);
+                    }}
+                    className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1.5 shadow-xs whitespace-nowrap"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Add entries</span>
+                    <span>Record Entry</span>
                   </button>
-                </div>
-                {(entryPanelOpen || editingEntryId) && (
-                <div
-                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                  onClick={closeEntryModal}
-                  role="dialog"
-                  aria-modal="true"
-                  aria-label="Record ledger entries"
-                >
-                <div
-                  ref={entryPanelRef}
-                  onClick={(ev) => ev.stopPropagation()}
-                  className="bg-white rounded-xl shadow-2xl p-5 space-y-4 w-full max-w-2xl max-h-[90vh] overflow-y-auto"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900">
-                        {editingEntryId
-                          ? 'Modify Existing Ledger Entry'
-                          : `Entries for ${entryDate}`}
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        {isTreasurer
-                          ? 'Logging as Room Treasurer'
-                          : 'Logging as Auditor (Authorized by Treasurer)'}
-                        {!editingEntryId && ` · ${rosterPeople.length} ${rosterPeople.length === 1 ? 'member' : 'members'} in this room`}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={closeEntryModal}
-                      className="text-xs text-slate-500 hover:text-slate-900 flex items-center gap-1"
-                      aria-label="Close"
-                    >
-                      <X className="w-4 h-4" />
-                      <span>{editingEntryId ? 'Cancel Edit' : 'Close'}</span>
-                    </button>
-                  </div>
-
-                  {editingEntryId ? (
-                  <form onSubmit={handleSaveEntry} className="space-y-4">
-                    <div className="grid sm:grid-cols-3 gap-3">
-                      <div className="sm:col-span-2">
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Entry Title / Description
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          maxLength={120}
-                          value={entryTitle}
-                          onChange={(e) => setEntryTitle(e.target.value)}
-                          placeholder="e.g. Semester Membership Contribution or Venue Deposit"
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Entry Date
-                        </label>
-                        <input
-                          type="date"
-                          required
-                          value={entryDate}
-                          onChange={(e) => setEntryDate(e.target.value)}
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-900"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid sm:grid-cols-3 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Transaction Type
-                        </label>
-                        <select
-                          value={entryType}
-                          onChange={(e) => setEntryType(e.target.value as 'add' | 'subtract')}
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                        >
-                          <option value="add">Fund Addition / Contribution (+)</option>
-                          <option value="subtract">Expense / Disbursement (-)</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Amount ({symbol})
-                        </label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0.01"
-                          required
-                          value={entryAmount}
-                          onChange={(e) => setEntryAmount(e.target.value)}
-                          placeholder="0.00"
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-900"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Category
-                        </label>
-                        <select
-                          value={entryCategory}
-                          onChange={(e) => setEntryCategory(e.target.value)}
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                        >
-                          {CATEGORIES.map((cat) => (
-                            <option key={cat} value={cat}>
-                              {cat}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Assign to Student / Member (for Student Contribution Report)
-                        </label>
-                        <select
-                          value={entryContributorUid}
-                          onChange={(e) => {
-                            const uid = e.target.value;
-                            setEntryContributorUid(uid);
-                            const m = members.find((x) => x.uid === uid);
-                            if (m) setEntryContributorName(m.username);
-                          }}
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
-                        >
-                          <option value="">Custom Name / General Organization</option>
-                          {members.map((m) => (
-                            <option key={m.uid} value={m.uid}>
-                              {m.username} ({m.role})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Contributor / Payee Name
-                        </label>
-                        <input
-                          type="text"
-                          maxLength={80}
-                          value={entryContributorName}
-                          onChange={(e) => setEntryContributorName(e.target.value)}
-                          placeholder={myUsername}
-                          className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        Reference Note / Receipt Number (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        maxLength={300}
-                        value={entryNote}
-                        onChange={(e) => setEntryNote(e.target.value)}
-                        placeholder="e.g. Official Receipt #10482 · Paid via GCash"
-                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900"
-                      />
-                    </div>
-
-                    {entryError && <div className="text-xs text-red-600">{entryError}</div>}
-
-                    <button
-                      type="submit"
-                      disabled={entryBusy}
-                      className="w-full flex items-center justify-center gap-1.5 py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium text-sm rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>
-                        {entryBusy
-                          ? 'Saving…'
-                          : editingEntryId
-                          ? 'Update Ledger Entry'
-                          : 'Save Entry to FundTracker'}
-                      </span>
-                    </button>
-                  </form>
-                  ) : (
-                  entryPanelOpen && (
-                    <form onSubmit={handleSaveBatch} className="space-y-4">
-                      <div className="flex flex-wrap items-end gap-3">
-                        <div>
-                          <label className="block text-xs font-medium text-slate-700 mb-1">
-                            Entry Date (all rows)
-                          </label>
-                          <input
-                            type="date"
-                            required
-                            value={entryDate}
-                            onChange={(e) => setEntryDate(e.target.value)}
-                            className="border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-slate-900"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={fillRowsWithEveryone}
-                          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-slate-300 rounded-lg hover:bg-slate-50"
-                        >
-                          <Users className="w-3.5 h-3.5" />
-                          <span>Add everyone ({rosterPeople.length})</span>
-                        </button>
-                      </div>
-
-                      <div className="space-y-3">
-                        {batchRows.map((row, idx) => (
-                          <div
-                            key={row.key}
-                            className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/50"
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="text-[11px] font-mono text-slate-500">
-                                Entry {idx + 1}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => removeBatchRow(row.key)}
-                                className="text-slate-400 hover:text-red-600"
-                                aria-label={`Remove entry ${idx + 1}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <div className="grid sm:grid-cols-2 gap-2">
-                              <select
-                                value={row.contributorUid}
-                                onChange={(e) => {
-                                  const uid = e.target.value;
-                                  const person = rosterPeople.find((p) => p.uid === uid);
-                                  updateBatchRow(row.key, {
-                                    contributorUid: uid,
-                                    contributorName: person ? person.name : row.contributorName,
-                                  });
-                                }}
-                                className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-                                aria-label="Person"
-                              >
-                                <option value="">Custom Name / General Organization</option>
-                                {rosterPeople.map((p) => (
-                                  <option key={p.uid} value={p.uid}>
-                                    {p.name} ({p.role})
-                                  </option>
-                                ))}
-                              </select>
-                              {row.contributorUid === '' ? (
-                                <input
-                                  type="text"
-                                  maxLength={80}
-                                  value={row.contributorName}
-                                  onChange={(e) =>
-                                    updateBatchRow(row.key, { contributorName: e.target.value })
-                                  }
-                                  placeholder={`Payee name (default: ${myUsername})`}
-                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm"
-                                />
-                              ) : (
-                                <div className="flex items-center text-xs text-slate-500 px-1">
-                                  {rosterPeople.find((p) => p.uid === row.contributorUid)?.role}
-                                </div>
-                              )}
-                            </div>
-                            <div className="grid grid-cols-3 gap-2">
-                              <select
-                                value={row.type}
-                                onChange={(e) =>
-                                  updateBatchRow(row.key, { type: e.target.value as 'add' | 'subtract' })
-                                }
-                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-                                aria-label="Type"
-                              >
-                                <option value="add">Contribution (+)</option>
-                                <option value="subtract">Expense (-)</option>
-                              </select>
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0.01"
-                                value={row.amount}
-                                onChange={(e) => updateBatchRow(row.key, { amount: e.target.value })}
-                                placeholder={`Amount (${symbol})`}
-                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm font-mono"
-                              />
-                              <select
-                                value={row.category}
-                                onChange={(e) => updateBatchRow(row.key, { category: e.target.value })}
-                                className="border border-slate-300 rounded-lg px-2 py-2 text-sm bg-white"
-                                aria-label="Category"
-                              >
-                                {CATEGORIES.map((cat) => (
-                                  <option key={cat} value={cat}>
-                                    {cat}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            <details className="text-xs text-slate-500">
-                              <summary className="cursor-pointer select-none">Title / note (optional)</summary>
-                              <div className="grid sm:grid-cols-2 gap-2 mt-2">
-                                <input
-                                  type="text"
-                                  maxLength={120}
-                                  value={row.title}
-                                  onChange={(e) => updateBatchRow(row.key, { title: e.target.value })}
-                                  placeholder="Title"
-                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm text-slate-900"
-                                />
-                                <input
-                                  type="text"
-                                  maxLength={300}
-                                  value={row.note}
-                                  onChange={(e) => updateBatchRow(row.key, { note: e.target.value })}
-                                  placeholder="Reference note / receipt no."
-                                  className="w-full border border-slate-300 rounded-lg px-2 py-2 text-sm text-slate-900"
-                                />
-                              </div>
-                            </details>
-                          </div>
-                        ))}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={addBatchRow}
-                        disabled={batchRows.length >= MAX_BATCH_ROWS}
-                        className="w-full flex items-center justify-center gap-1.5 py-2 text-xs font-medium border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add another entry</span>
-                      </button>
-
-                      {entryError && <div className="text-xs text-red-600">{entryError}</div>}
-
-                      <button
-                        type="submit"
-                        disabled={entryBusy}
-                        className="w-full flex items-center justify-center gap-1.5 py-2.5 px-4 bg-slate-900 hover:bg-slate-800 text-white font-medium text-sm rounded-lg transition-colors whitespace-nowrap disabled:opacity-50"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>
-                          {entryBusy
-                            ? 'Saving…'
-                            : `Save ${batchRows.filter((r) => r.amount.trim() !== '').length || ''} ${
-                                batchRows.filter((r) => r.amount.trim() !== '').length === 1
-                                  ? 'Entry'
-                                  : 'Entries'
-                              } to FundTracker`.replace(/\s+/g, ' ')}
-                        </span>
-                      </button>
-                    </form>
-                  )
-                  )}
-                </div>
-                </div>
                 )}
-                </>
-              ) : (
-                <div className="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
-                      <Lock className="w-4 h-4 text-slate-500" />
-                      <span>
-                        {isPreviewingOtherPov
-                          ? `Viewing ${activeViewedPov.toUpperCase()} POV (Preview Mode — Role Not Transferred)`
-                          : isAuditor
-                          ? 'Expense Modification Requires Treasurer Authorization'
-                          : 'Read-Only Student Dashboard Mode'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500">
-                      {isPreviewingOtherPov
-                        ? `You are viewing the ${activeViewedPov} perspective in read-only preview mode. Switch the POV Viewer tab back to "${myRole} POV (My Role)" to use your ${myRole} controls.`
-                        : isAuditor
-                        ? 'As Auditor, you can verify and flag any entry on the right. Once the Treasurer enables "Authorize Auditor to Modify Expenses", the expense editor will unlock here automatically.'
-                        : 'Students have view-only access and cannot switch to Treasurer or Auditor POVs. You can inspect every entry on the right or view your personal contribution report.'}
-                    </p>
-                  </div>
-                </div>
-              )}
+              </div>
             </div>
 
             {/* Right 5 Columns: Live Ledger Stream with Verification & Edit Controls */}
@@ -3888,61 +2728,166 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Search & Segmented Filter Controls */}
-              <div className="space-y-2">
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    placeholder="Filter by title, student contributor, category…"
-                    className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-slate-900"
-                  />
-                </div>
-
-                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
-                  {(
-                    [
-                      ['all', 'All'],
-                      ['add', 'Funds (+)'],
-                      ['subtract', 'Expenses (-)'],
-                      ['verified', 'Verified'],
-                      ['unverified', 'Unverified'],
-                      ['flagged', 'Flagged'],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setFilterType(key)}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                        filterType === key
-                          ? 'bg-white text-slate-900 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+              {/* View Switcher: Chronological Stream vs. By Member Balances */}
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg text-xs font-medium">
+                <button
+                  type="button"
+                  onClick={() => setLedgerViewMode('stream')}
+                  className={`flex-1 py-1.5 rounded-md transition-all ${
+                    ledgerViewMode === 'stream'
+                      ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  All Transactions ({filteredEntries.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLedgerViewMode('members')}
+                  className={`flex-1 py-1.5 rounded-md transition-all ${
+                    ledgerViewMode === 'members'
+                      ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  By Member Balances ({memberSummaries.length})
+                </button>
               </div>
 
-              {/* Entries List */}
-              <div className="divide-y divide-slate-200 max-h-[600px] overflow-y-auto pr-1">
-                {filteredEntries.length === 0 ? (
-                  <div className="py-10 text-center space-y-1">
-                    <div className="text-xs font-medium text-slate-500">
-                      No matching ledger entries found.
+              {ledgerViewMode === 'members' ? (
+                /* Auto Add/Subtract Member Balances Summary List */
+                <div className="space-y-2">
+                  <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                    <span>All entries auto-calculate each student's net balance:</span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('student_reports')}
+                      className="text-slate-900 font-semibold underline hover:text-slate-700"
+                    >
+                      View Detailed Statements →
+                    </button>
+                  </div>
+
+                  <div className="divide-y divide-slate-100 max-h-[560px] overflow-y-auto pr-1">
+                    {memberSummaries.length === 0 ? (
+                      <div className="py-8 text-center text-xs text-slate-400">
+                        No assigned members found yet.
+                      </div>
+                    ) : (
+                      memberSummaries.map((m) => (
+                        <div
+                          key={m.key}
+                          className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50 px-2 rounded-lg transition-colors cursor-pointer"
+                          onClick={() => {
+                            setSelectedMemberForReport(m.uid || m.name);
+                            setActiveTab('student_reports');
+                          }}
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-semibold text-slate-900 truncate">
+                                {m.name}
+                              </span>
+                              {m.uid === userProfile.uid && (
+                                <span className="text-[10px] px-1 py-0.2 bg-slate-100 text-slate-700 rounded font-medium">
+                                  You
+                                </span>
+                              )}
+                              <span className="text-[10px] capitalize px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded">
+                                {m.role}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                              <span>{m.entryCount} entries</span>
+                              <span>·</span>
+                              <span className="text-emerald-700 font-mono">+{fmtMoney(symbol, m.totalAdded)}</span>
+                              <span>/</span>
+                              <span className="text-red-600 font-mono">-{fmtMoney(symbol, m.totalSubtracted)}</span>
+                            </div>
+                          </div>
+
+                          <div className="text-right shrink-0 space-y-0.5">
+                            <div className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
+                              Final Balance
+                            </div>
+                            <div
+                              className={`text-sm font-bold font-mono tabular-nums ${
+                                m.finalBalance < 0
+                                  ? 'text-red-600'
+                                  : m.finalBalance > 0
+                                  ? 'text-emerald-700'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              {fmtMoney(symbol, m.finalBalance)}
+                            </div>
+                            <div className="text-[10px] text-slate-900 underline font-medium">
+                              View Dates & History →
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Chronological Transactions Stream */
+                <>
+                  {/* Search & Segmented Filter Controls */}
+                  <div className="space-y-2">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        placeholder="Filter by title, student contributor, category…"
+                        className="w-full border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-slate-900"
+                      />
                     </div>
-                    <div className="text-xs text-slate-400">
-                      {canModifyExpenses
-                        ? 'Use the form on the left to record a fund contribution or expense.'
-                        : 'Entries added by the Treasurer will appear here in real time.'}
+
+                    <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
+                      {(
+                        [
+                          ['all', 'All'],
+                          ['add', 'Funds (+)'],
+                          ['subtract', 'Expenses (-)'],
+                          ['verified', 'Verified'],
+                          ['unverified', 'Unverified'],
+                          ['flagged', 'Flagged'],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setFilterType(key)}
+                          className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                            filterType === key
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
                     </div>
                   </div>
-                ) : (
-                  filteredEntries.map((entry) => (
+
+                  {/* Entries List */}
+                  <div className="divide-y divide-slate-200 max-h-[600px] overflow-y-auto pr-1">
+                    {filteredEntries.length === 0 ? (
+                      <div className="py-10 text-center space-y-1">
+                        <div className="text-xs font-medium text-slate-500">
+                          No matching ledger entries found.
+                        </div>
+                        <div className="text-xs text-slate-400">
+                          {canModifyExpenses
+                            ? 'Use the form on the left to record a fund contribution or expense.'
+                            : 'Entries added by the Treasurer will appear here in real time.'}
+                        </div>
+                      </div>
+                    ) : (
+                      filteredEntries.map((entry) => (
                     <div key={entry.id} className="py-3.5 space-y-2">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-0.5">
@@ -3957,7 +2902,31 @@ export default function App() {
                             {entry.contributorName && (
                               <>
                                 <span aria-hidden="true">·</span>
-                                <span>By: {entry.contributorName}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedMemberForReport(entry.contributorUid || entry.contributorName);
+                                    setActiveTab('student_reports');
+                                  }}
+                                  className="inline-flex items-center gap-1 text-slate-700 hover:text-slate-900 underline font-medium hover:bg-slate-100 px-1 py-0.5 rounded transition-colors text-left"
+                                  title="Click to view this member's auto-calculated final balance and full date statement"
+                                >
+                                  <span>By: {entry.contributorName}</span>
+                                  {(() => {
+                                    const key = entry.contributorUid || entry.contributorName.trim().toLowerCase();
+                                    const bal = memberBalanceMap[key];
+                                    if (bal === undefined) return null;
+                                    return (
+                                      <span
+                                        className={`font-mono text-[10px] px-1.5 py-0.2 rounded font-semibold tabular-nums ${
+                                          bal < 0 ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'
+                                        }`}
+                                      >
+                                        Bal: {fmtMoney(symbol, bal)}
+                                      </span>
+                                    );
+                                  })()}
+                                </button>
                               </>
                             )}
                           </div>
@@ -4083,9 +3052,11 @@ export default function App() {
                   ))
                 )}
               </div>
-            </div>
-          </div>
-        )}
+            </>
+          )}
+        </div>
+      </div>
+    )}
 
         {/* TAB 2: AUDIT & VERIFICATION CONSOLE */}
         {activeTab === 'verification' && (
@@ -4152,9 +3123,39 @@ export default function App() {
                           </div>
                         </td>
                         <td className="py-3 px-4 text-slate-600">
-                          <div>{entry.contributorName || 'General'}</div>
-                          <div className="text-slate-400">
-                            Modified by {entry.lastModifiedByName}
+                          {entry.contributorName ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedMemberForReport(entry.contributorUid || entry.contributorName);
+                                setActiveTab('student_reports');
+                              }}
+                              className="text-left group"
+                              title="View member statement and date breakdown"
+                            >
+                              <div className="font-medium text-slate-900 group-hover:underline">
+                                {entry.contributorName}
+                              </div>
+                              {(() => {
+                                const key = entry.contributorUid || entry.contributorName.trim().toLowerCase();
+                                const bal = memberBalanceMap[key];
+                                if (bal === undefined) return null;
+                                return (
+                                  <div
+                                    className={`text-[11px] font-mono tabular-nums font-semibold ${
+                                      bal < 0 ? 'text-red-600' : 'text-emerald-700'
+                                    }`}
+                                  >
+                                    Final Bal: {fmtMoney(symbol, bal)}
+                                  </div>
+                                );
+                              })()}
+                            </button>
+                          ) : (
+                            <div className="text-slate-500">General Fund</div>
+                          )}
+                          <div className="text-[11px] text-slate-400">
+                            By {entry.lastModifiedByName}
                           </div>
                         </td>
                         <td
@@ -4223,110 +3224,28 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB 3: STUDENT PERSONAL CONTRIBUTIONS REPORT */}
+        {/* TAB 3: STUDENT & MEMBER BALANCES (Auto add/subtract balances with date breakdowns) */}
         {activeTab === 'student_reports' && (
-          <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="space-y-1">
-                <h2 className="text-lg font-bold text-slate-900">
-                  Personal Contributions Report — {myUsername}
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Dedicated statement of all fund contributions attributed to your account ({myUsername}) in {room.name}.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  exportToCsv(
-                    myContributions,
-                    `contributions_${myUsername.replace(/\s+/g, '_')}_${room.id}.csv`
-                  )
-                }
-                className="px-3.5 py-2 text-xs font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Download My Contribution Report (CSV)</span>
-              </button>
-            </div>
-
-            <div className="grid sm:grid-cols-3 gap-4 border-y border-slate-200 py-4">
-              <div>
-                <div className="text-xs text-slate-500">
-                  My Total Verified & Logged Contributions
-                </div>
-                <div className="text-2xl font-bold font-mono tabular-nums text-emerald-700">
-                  +{fmtMoney(symbol, myTotalContributed)}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500">Contribution Records Count</div>
-                <div className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                  {myContributions.length}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500">Auditor Verified Payments</div>
-                <div className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                  {myContributions.filter((c) => c.verified).length} /{' '}
-                  {myContributions.length}
-                </div>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
-                    <th className="py-3 pr-4">Date</th>
-                    <th className="py-3 px-4">Contribution Title</th>
-                    <th className="py-3 px-4">Category</th>
-                    <th className="py-3 px-4">Receipt / Reference Note</th>
-                    <th className="py-3 px-4">Auditor Verification</th>
-                    <th className="py-3 pl-4 text-right">Amount Contributed</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 text-xs">
-                  {myContributions.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400">
-                        No personal contributions are currently attributed to "{myUsername}". When the Treasurer logs a contribution under your name, it will appear here automatically.
-                      </td>
-                    </tr>
-                  ) : (
-                    myContributions.map((c) => (
-                      <tr key={c.id} className="hover:bg-slate-50/80">
-                        <td className="py-3 pr-4 font-mono text-slate-600 whitespace-nowrap">
-                          {c.entryDate}
-                        </td>
-                        <td className="py-3 px-4 font-semibold text-slate-900">
-                          {c.title}
-                        </td>
-                        <td className="py-3 px-4 text-slate-600">{c.category}</td>
-                        <td className="py-3 px-4 text-slate-500">{c.note || '—'}</td>
-                        <td className="py-3 px-4">
-                          {c.verified ? (
-                            <span className="text-emerald-700 font-medium flex items-center gap-1">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>Verified by {c.verifiedByName || 'Auditor'}</span>
-                            </span>
-                          ) : (
-                            <span className="text-slate-400">
-                              Pending Auditor Verification
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-3 pl-4 text-right font-mono font-semibold text-emerald-700 tabular-nums whitespace-nowrap">
-                          +{fmtMoney(symbol, c.amount)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
+          <MemberBalances
+            entries={entries}
+            members={members}
+            symbol={symbol}
+            currentUserId={userProfile.uid}
+            currentUsername={myUsername}
+            currentUserRole={myRole || 'student'}
+            canModifyExpenses={canModifyExpenses}
+            canVerifyEntries={canVerifyEntries}
+            roomName={room.name}
+            roomId={room.id}
+            onEditEntry={startEditEntry}
+            onVerifyEntry={handleAuditorVerify}
+            onFlagEntry={handleAuditorFlag}
+            onSelectDate={(d) => {
+              setSelectedDate(d);
+              setActiveTab('dashboard');
+            }}
+            initialSelectedMemberKey={selectedMemberForReport || userProfile.uid}
+          />
         )}
 
         {/* TAB 4: ROLES & PERMISSIONS GOVERNANCE */}
@@ -4729,7 +3648,7 @@ export default function App() {
                   <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="text-sm font-bold text-slate-900">
-                        01. Clear Ledger Entries in "{room.name}"
+                        Clear Ledger Entries in "{room.name}"
                       </div>
                       <span className="text-xs font-mono text-slate-500 tabular-nums">
                         {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
@@ -4774,7 +3693,7 @@ export default function App() {
                   <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="text-sm font-bold text-slate-900">
-                        02. Delete This Room ("{room.name}")
+                        Delete This Room ("{room.name}")
                       </div>
                       <span className="text-xs font-mono text-slate-500">ID: {room.id}</span>
                     </div>
@@ -4819,7 +3738,7 @@ export default function App() {
                       <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                       <div className="space-y-1">
                         <div className="text-sm font-bold text-red-900">
-                          03. Global Clean Start — Wipe All Rooms ({publicRooms.length} Total)
+                          Global Clean Start — Wipe All Rooms ({publicRooms.length} Total)
                         </div>
                         <p className="text-xs text-red-800 leading-relaxed">
                           Wipes out every room in the database ({publicRooms.length} active rooms), all financial ledger entries, and all room member rosters so there is zero room clutter or lag.
@@ -4927,10 +3846,7 @@ export default function App() {
 
                   <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg max-h-64 overflow-y-auto">
                     {allUsersDirectory.map((u) => {
-                      const isPrimaryOwnerUser =
-                        u.username.toLowerCase() === 'franzatuel' ||
-                        u.username.toLowerCase().includes('franz') ||
-                        u.uid === 'aMVdQVuMuYMISlIcFuafEA8l8v53';
+                      const isPrimaryOwnerUser = u.username.toLowerCase() === 'franzatuel';
                       const isAuthorized =
                         isPrimaryOwnerUser ||
                         wipeAuthorities.some(
@@ -4987,6 +3903,49 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Entry Modal for Creating / Editing Single or Batch Entries */}
+      <EntryModal
+        isOpen={entryPanelOpen || Boolean(editingEntryId)}
+        onClose={() => {
+          setEntryPanelOpen(false);
+          setEditingEntryId(null);
+        }}
+        isEditing={Boolean(editingEntryId)}
+        entryBusy={entryBusy}
+        entryError={entryError}
+        symbol={symbol}
+        categories={CATEGORIES}
+        memberBalances={memberBalanceMap}
+        entryTitle={entryTitle}
+        setEntryTitle={setEntryTitle}
+        entryCategory={entryCategory}
+        setEntryCategory={setEntryCategory}
+        entryAmount={entryAmount}
+        setEntryAmount={setEntryAmount}
+        entryType={entryType}
+        setEntryType={setEntryType}
+        entryDate={entryDate}
+        setEntryDate={setEntryDate}
+        entryNote={entryNote}
+        setEntryNote={setEntryNote}
+        entryContributorUid={entryContributorUid}
+        setEntryContributorUid={setEntryContributorUid}
+        entryContributorName={entryContributorName}
+        setEntryContributorName={setEntryContributorName}
+        onSaveSingle={handleSaveEntry}
+        batchRows={batchRows}
+        updateBatchRow={updateBatchRow}
+        addBatchRow={addBatchRow}
+        removeBatchRow={removeBatchRow}
+        fillRowsWithEveryone={fillRowsWithEveryone}
+        onSaveBatch={handleSaveBatch}
+        rosterPeople={rosterPeople}
+        members={members}
+        isTreasurer={isTreasurer}
+        myUsername={myUsername}
+        maxBatchRows={MAX_BATCH_ROWS}
+      />
 
       <footer className="border-t border-slate-200 bg-white px-6 py-4 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2 mt-8">
         <span>FundTracker Ledger · Room {room.id}</span>
