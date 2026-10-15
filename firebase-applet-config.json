@@ -1,12 +1,12 @@
 {
-  "projectId": "smiling-landing-thl8x",
-  "appId": "1:982152829785:web:90497bcceb0e6cddb78a48",
-  "apiKey": "AIzaSyBLYQ1y3Sr0JtQZsnVxtGbh7Zu0R6slEUU",
-  "authDomain": "smiling-landing-thl8x.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-8eeeb853-b6c5-4e75-ae84-50aa77ec7cc6",
-  "storageBucket": "smiling-landing-thl8x.firebasestorage.app",
-  "messagingSenderId": "982152829785",
+  "projectId": "fundtracker-ledgerrr",
+  "appId": "1:54314329648:web:4df7a7defd9091a47aeff5",
+  "apiKey": "AIzaSyCIl2tn7A5IfoGO66s9AUXh9hXY1_hojpM",
+  "authDomain": "fundtracker-ledgerrr.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "fundtracker-ledgerrr.firebasestorage.app",
+  "messagingSenderId": "54314329648",
   "measurementId": "",
-  "oAuthClientId": "982152829785-vemgvt1elqe0llpdmpg2c87p41iep0ef.apps.googleusercontent.com",
+  "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }
