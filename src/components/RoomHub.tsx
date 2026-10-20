@@ -24,6 +24,7 @@ interface RoomHubProps {
   myJoinedRooms: Room[];
   myJoinedRoomsIndex: UserJoinedRoom[];
   publicRooms: Room[];
+  adminRooms: Room[];
   allUsersDirectory: UserProfile[];
   filteredUsersDirectory: UserProfile[];
   userDirSearch: string;
@@ -72,6 +73,7 @@ export const RoomHub: React.FC<RoomHubProps> = ({
   myJoinedRooms,
   myJoinedRoomsIndex,
   publicRooms,
+  adminRooms,
   allUsersDirectory,
   filteredUsersDirectory,
   userDirSearch,
@@ -796,13 +798,85 @@ export const RoomHub: React.FC<RoomHubProps> = ({
               </div>
             </div>
 
+            {/* Every room on the website (public + private) */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  All Rooms on the Website ({adminRooms.length})
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Every room, public and private. Delete a single room here, or wipe them all below.
+                </p>
+              </div>
+              {adminRooms.length === 0 ? (
+                <div className="text-xs text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">
+                  There are no rooms in the database.
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                  {adminRooms.map((r) => (
+                    <div key={r.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-slate-900 truncate">{r.name}</span>
+                          <span
+                            className={`text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                              r.isPublicRoom ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'
+                            }`}
+                          >
+                            {r.isPublicRoom ? 'Public' : 'Private'}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Treasurer: {r.treasurerName || 'Unknown'} · Auditor: {r.auditorName || 'Vacant'} · ID: {r.id}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {confirmDeleteId === r.id ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={wipeBusy}
+                              onClick={() => {
+                                onDeleteRoom(r.id);
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-2.5 py-1 bg-red-600 text-white text-xs font-semibold rounded hover:bg-red-700"
+                            >
+                              Confirm delete
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs rounded hover:bg-slate-200"
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={wipeBusy}
+                            onClick={() => setConfirmDeleteId(r.id)}
+                            className="px-2.5 py-1 bg-white border border-red-300 text-red-700 text-xs font-medium rounded hover:bg-red-50"
+                          >
+                            Delete room
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Global Wipe Card */}
             <div className="bg-red-50/50 border border-red-200 rounded-2xl p-6 space-y-3">
               <div className="flex items-start gap-3">
                 <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <h3 className="text-sm font-bold text-red-900">
-                    Reset Database — Wipe All Rooms ({publicRooms.length} total)
+                    Reset Database — Wipe All Rooms ({adminRooms.length} total)
                   </h3>
                   <p className="text-xs text-red-800 leading-relaxed">
                     Deletes every room and transaction across the application for a fresh start. This action cannot be reversed.
@@ -813,7 +887,7 @@ export const RoomHub: React.FC<RoomHubProps> = ({
               {!confirmWipeAllRooms ? (
                 <button
                   type="button"
-                  disabled={wipeBusy || publicRooms.length === 0}
+                  disabled={wipeBusy || adminRooms.length === 0}
                   onClick={() => setConfirmWipeAllRooms(true)}
                   className="py-2 px-4 bg-white border border-red-300 hover:bg-red-50 text-red-700 text-xs font-semibold rounded-xl transition-colors disabled:opacity-40"
                 >

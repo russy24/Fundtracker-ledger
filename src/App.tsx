@@ -140,6 +140,7 @@ export default function App() {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
   const [publicRooms, setPublicRooms] = useState<Room[]>([]);
+  const [allRooms, setAllRooms] = useState<Room[]>([]);
   const [myJoinedRoomsIndex, setMyJoinedRoomsIndex] = useState<UserJoinedRoom[]>([]);
   const [newMemberInput, setNewMemberInput] = useState<string>('');
   const [newMemberRole, setNewMemberRole] = useState<RoleType>('student');
@@ -681,6 +682,28 @@ export default function App() {
     isSuperAdmin || hasDelegatedWipeAuth || isListedInWipeAuthorities
   );
 
+  // Authority holders see EVERY room (public and private) in the Administration tab / wipe controls
+  useEffect(() => {
+    if (!authReady || !userProfile || !canWipeRooms) {
+      setAllRooms([]);
+      return;
+    }
+    const unsub = onSnapshot(
+      collection(db, 'rooms'),
+      (snap) => {
+        const list: Room[] = [];
+        snap.forEach((d) => list.push(d.data() as Room));
+        list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        setAllRooms(list);
+      },
+      (err) => console.error('Could not load all rooms:', err)
+    );
+    return () => unsub();
+  }, [authReady, userProfile, canWipeRooms]);
+
+  // Rooms shown in wipe / admin areas: everything for authority holders
+  const roomsForAdmin = canWipeRooms ? allRooms : publicRooms;
+
   // Filter Active Shared FundTracker Rooms strictly to ONLY the rooms the user has joined (or is Treasurer/Auditor of)
   const myJoinedRooms = useMemo(() => {
     if (!currentUid) return [];
@@ -782,51 +805,83 @@ export default function App() {
   };
 
   // Treasurer or Auditor: Directly add a user by Username or UID into the room (pre-approved!)
+  // - Registered accounts are found by UID, username or display name.
+  // - A name with no account is added as a "manual member" so contributions can still be recorded.
   const handleDirectAddMemberToRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!room || (!isTreasurer && !isAuditor && !isSuperAdmin)) return;
     const raw = newMemberInput.trim();
-    if (!raw) return;
+    if (!raw) {
+      setMemberManageMsg('Type a username, display name or Account UID first.');
+      return;
+    }
 
     setMemberManageBusy(true);
     setMemberManageMsg('');
     try {
+      const lowerRaw = raw.toLowerCase();
       let targetProfile: UserProfile | null = null;
-      const directSnap = await getDoc(doc(db, 'users', raw));
-      if (directSnap.exists()) {
-        targetProfile = directSnap.data() as UserProfile;
-      } else {
+
+      // 1) exact UID
+      if (/^[a-zA-Z0-9_-]{1,128}$/.test(raw)) {
+        const directSnap = await getDoc(doc(db, 'users', raw));
+        if (directSnap.exists()) targetProfile = directSnap.data() as UserProfile;
+      }
+      // 2) already-loaded directory (username / display name / uid)
+      if (!targetProfile) {
         const matched = allUsersDirectory.find(
           (u) =>
-            u.username.toLowerCase() === raw.toLowerCase() ||
-            u.uid.toLowerCase() === raw.toLowerCase()
+            (u.username || '').toLowerCase() === lowerRaw ||
+            (u.displayName || '').toLowerCase() === lowerRaw ||
+            (u.uid || '').toLowerCase() === lowerRaw
         );
         if (matched) targetProfile = matched;
       }
-
-      const targetUid = targetProfile
-        ? targetProfile.uid
-        : raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
-      const targetUsername = sanitizeString(
-        targetProfile ? targetProfile.displayName || targetProfile.username : raw,
-        60
-      );
-
-      if (!targetUid) {
-        setMemberManageMsg('Please enter a valid username or Account UID.');
-        setMemberManageBusy(false);
-        return;
+      // 3) ask the database directly
+      if (!targetProfile) {
+        for (const field of ['username', 'displayName'] as const) {
+          for (const value of Array.from(new Set([lowerRaw, raw]))) {
+            const snap = await getDocs(query(collection(db, 'users'), where(field, '==', value)));
+            if (!snap.empty) {
+              targetProfile = snap.docs[0].data() as UserProfile;
+              break;
+            }
+          }
+          if (targetProfile) break;
+        }
       }
 
-      // Ensure /users/{targetUid} exists so Firestore rules pass isRegisteredUser
-      const checkUserSnap = await getDoc(doc(db, 'users', targetUid));
-      if (!checkUserSnap.exists()) {
-        await setDoc(doc(db, 'users', targetUid), {
-          uid: targetUid,
-          username: sanitizeString(raw.replace(/[^a-zA-Z0-9_-]/g, ''), 40) || 'student_user',
-          displayName: targetUsername,
-          createdAt: serverTimestamp(),
-        });
+      const isManual = !targetProfile;
+      let targetUid = '';
+      let targetUsername = '';
+
+      if (targetProfile) {
+        targetUid = targetProfile.uid;
+        targetUsername = sanitizeString(targetProfile.displayName || targetProfile.username, 60);
+      } else {
+        const slug = lowerRaw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+        if (slug.length < 2) {
+          setMemberManageMsg('Please type a name with at least 2 letters or numbers.');
+          return;
+        }
+        targetUid = `manual_${slug}`;
+        targetUsername = sanitizeString(raw, 60);
+        // Make sure the placeholder profile exists (Firestore rules need a registered /users doc)
+        const placeholderSnap = await getDoc(doc(db, 'users', targetUid));
+        if (!placeholderSnap.exists()) {
+          await setDoc(doc(db, 'users', targetUid), {
+            uid: targetUid,
+            username: slug,
+            displayName: targetUsername,
+            createdAt: serverTimestamp(),
+          });
+        }
+      }
+
+      const alreadyIn = members.find((m) => m.uid === targetUid);
+      if (alreadyIn && alreadyIn.approvalStatus !== 'pending') {
+        setMemberManageMsg(`${targetUsername} is already in "${room.name}".`);
+        return;
       }
 
       const assignedRole: RoleType =
@@ -840,23 +895,37 @@ export default function App() {
         });
       }
 
-      await setDoc(doc(db, 'rooms', room.id, 'members', targetUid), {
-        uid: targetUid,
-        roomId: room.id,
-        username: targetUsername,
-        role: assignedRole,
-        approvalStatus: 'approved',
-        joinedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      if (alreadyIn) {
+        // Pending request: approve it instead of creating a duplicate
+        await updateDoc(doc(db, 'rooms', room.id, 'members', targetUid), {
+          approvalStatus: 'approved',
+          role: assignedRole,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, 'rooms', room.id, 'members', targetUid), {
+          uid: targetUid,
+          roomId: room.id,
+          username: targetUsername,
+          role: assignedRole,
+          approvalStatus: 'approved',
+          joinedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
 
       await upsertUserJoinedRoomIndex(targetUid, room, assignedRole, 'approved');
       setNewMemberInput('');
       setMemberManageMsg(
-        `Added and verified ${targetUsername} (${assignedRole}) into "${room.name}".`
+        isManual
+          ? `Added "${targetUsername}" as a member without an account (${assignedRole}). You can record their contributions. If they have an account, ask them to sign in once and add them by username instead.`
+          : `Added ${targetUsername} (${assignedRole}) into "${room.name}".`
       );
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `rooms/${room.id}/members`);
+      console.error('Add member failed:', err);
+      setMemberManageMsg(
+        `Could not add that person: ${err instanceof Error ? err.message : String(err)}`
+      );
     } finally {
       setMemberManageBusy(false);
     }
@@ -1968,6 +2037,7 @@ export default function App() {
         myJoinedRooms={myJoinedRooms}
         myJoinedRoomsIndex={myJoinedRoomsIndex}
         publicRooms={publicRooms}
+        adminRooms={roomsForAdmin}
         allUsersDirectory={allUsersDirectory}
         filteredUsersDirectory={filteredUsersDirectory}
         userDirSearch={userDirSearch}
@@ -3738,10 +3808,10 @@ export default function App() {
                       <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                       <div className="space-y-1">
                         <div className="text-sm font-bold text-red-900">
-                          Global Clean Start — Wipe All Rooms ({publicRooms.length} Total)
+                          Global Clean Start — Wipe All Rooms ({roomsForAdmin.length} Total)
                         </div>
                         <p className="text-xs text-red-800 leading-relaxed">
-                          Wipes out every room in the database ({publicRooms.length} active rooms), all financial ledger entries, and all room member rosters so there is zero room clutter or lag.
+                          Wipes out every room in the database ({roomsForAdmin.length} active rooms), all financial ledger entries, and all room member rosters so there is zero room clutter or lag.
                         </p>
                       </div>
                     </div>
@@ -3749,20 +3819,20 @@ export default function App() {
                     {!confirmWipeAllRooms ? (
                       <button
                         type="button"
-                        disabled={wipeBusy || publicRooms.length === 0}
+                        disabled={wipeBusy || roomsForAdmin.length === 0}
                         onClick={() => setConfirmWipeAllRooms(true)}
                         className="w-full py-2 px-4 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-40"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
                         <span>
-                          Wipe All {publicRooms.length}{' '}
-                          {publicRooms.length === 1 ? 'Room' : 'Rooms'} & Reset Database
+                          Wipe All {roomsForAdmin.length}{' '}
+                          {roomsForAdmin.length === 1 ? 'Room' : 'Rooms'} & Reset Database
                         </span>
                       </button>
                     ) : (
                       <div className="space-y-2 pt-1">
                         <div className="text-xs font-semibold text-red-900">
-                          Are you sure you want to wipe all {publicRooms.length} rooms and all ledger data?
+                          Are you sure you want to wipe all {roomsForAdmin.length} rooms and all ledger data?
                         </div>
                         <div className="flex items-center gap-2">
                           <button

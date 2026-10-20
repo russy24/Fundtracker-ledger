@@ -23,7 +23,11 @@ export function fmtMoney(symbol: string, n: number): string {
 }
 
 export function toDateKey(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  // Local date (not UTC), so "today" is correct early in the morning in your time zone
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export const MonthCalendar: React.FC<MonthCalendarProps> = ({
