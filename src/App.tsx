@@ -785,20 +785,60 @@ export default function App() {
   };
 
   // Treasurer or Auditor: Reject / Remove a member or pending request
+  // Removing someone fully takes away their access: officer seat, membership record AND their "My Rooms" entry.
   const handleRemoveRoomMember = async (member: RoomMember) => {
     if (!room || (!isTreasurer && !isAuditor && !isSuperAdmin)) return;
+
+    if (member.uid === room.treasurerId && !isSuperAdmin) {
+      setMemberManageMsg(
+        "The Treasurer can't be removed from their own room. Only the website owner can do that."
+      );
+      return;
+    }
+
     setMemberManageBusy(true);
     setMemberManageMsg('');
     try {
+      // 1) Free the officer seat first. Otherwise a removed Auditor/Treasurer would still be
+      //    recognised by the room document and could walk back in without approval.
+      if (room.auditorId && member.uid === room.auditorId) {
+        await updateDoc(doc(db, 'rooms', room.id), {
+          auditorId: '',
+          auditorName: '',
+          auditorCanModify: false,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      if (room.treasurerId && member.uid === room.treasurerId && isSuperAdmin) {
+        await updateDoc(doc(db, 'rooms', room.id), {
+          treasurerId: '',
+          treasurerName: '',
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      // 2) Remove the membership record
       await deleteDoc(doc(db, 'rooms', room.id, 'members', member.uid));
+
+      // 3) Remove the room from that person's "My Rooms" list
+      let indexCleaned = true;
       try {
         await deleteDoc(doc(db, 'users', member.uid, 'joined_rooms', room.id));
-      } catch {
-        // Ignore if joined_rooms doc wasn't created
+      } catch (indexErr) {
+        indexCleaned = false;
+        console.error('Could not remove the My Rooms entry:', indexErr);
       }
-      setMemberManageMsg(`Removed ${member.username} from "${room.name}".`);
+
+      setMemberManageMsg(
+        indexCleaned
+          ? `Removed ${member.username} from "${room.name}". They must send a new request and be approved to get back in.`
+          : `Removed ${member.username} from "${room.name}", but their My Rooms entry could not be cleared. Try Remove again.`
+      );
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `rooms/${room.id}/members/${member.uid}`);
+      console.error('Remove member failed:', err);
+      setMemberManageMsg(
+        `Could not remove ${member.username}: ${err instanceof Error ? err.message : String(err)}`
+      );
     } finally {
       setMemberManageBusy(false);
     }
@@ -1339,6 +1379,18 @@ export default function App() {
     if (!userProfile || !room) return;
     if (myRole === 'student' && targetRole !== 'student') {
       return;
+    }
+    // Officer seats can only be taken directly in a brand-new room (no officers yet), by the website
+    // owner, or by someone who is already an approved member. Anyone else (for example a person who was
+    // just removed) must send a join request and wait for the Treasurer/Auditor to approve.
+    if (targetRole !== 'student') {
+      const alreadyOfficer = room.treasurerId === userProfile.uid || room.auditorId === userProfile.uid;
+      const canClaim =
+        isSuperAdmin ||
+        alreadyOfficer ||
+        myMemberRecord?.approvalStatus === 'approved' ||
+        (!room.treasurerId && !room.auditorId);
+      if (!canClaim) return;
     }
     const roomRef = doc(db, 'rooms', room.id);
     const memberRef = doc(db, 'rooms', room.id, 'members', userProfile.uid);
@@ -2115,6 +2167,14 @@ export default function App() {
   );
   const auditorTakenByOther = Boolean(room.auditorId && room.auditorId !== currentUid);
 
+  const canClaimOfficerSeat = Boolean(
+    isSuperAdmin ||
+      room.treasurerId === currentUid ||
+      room.auditorId === currentUid ||
+      myMemberRecord?.approvalStatus === 'approved' ||
+      (!room.treasurerId && !room.auditorId)
+  );
+
   if (!myRole) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
@@ -2135,7 +2195,7 @@ export default function App() {
             {/* Treasurer Option */}
             <button
               type="button"
-              disabled={treasurerTakenByOther}
+              disabled={treasurerTakenByOther || !canClaimOfficerSeat}
               onClick={() => handleSelectRole('treasurer')}
               className="w-full p-4 rounded-xl border border-slate-200 hover:border-slate-900 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-start gap-3"
             >
@@ -2145,6 +2205,8 @@ export default function App() {
                 <div className="text-xs text-slate-500">
                   {treasurerTakenByOther
                     ? `Currently assigned to ${room.treasurerName || 'another member'}`
+                    : !canClaimOfficerSeat
+                    ? 'Not available: ask the room officers to appoint you. Request Student access below instead.'
                     : 'Claim vacant Treasurer seat: Manage funds, modify expenses, and approve members.'}
                 </div>
               </div>
@@ -2153,7 +2215,7 @@ export default function App() {
             {/* Auditor Option */}
             <button
               type="button"
-              disabled={auditorTakenByOther}
+              disabled={auditorTakenByOther || !canClaimOfficerSeat}
               onClick={() => handleSelectRole('auditor')}
               className="w-full p-4 rounded-xl border border-slate-200 hover:border-slate-900 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-start gap-3"
             >
@@ -2163,6 +2225,8 @@ export default function App() {
                 <div className="text-xs text-slate-500">
                   {auditorTakenByOther
                     ? `Currently assigned to ${room.auditorName || 'another member'}`
+                    : !canClaimOfficerSeat
+                    ? 'Not available: ask the Treasurer to appoint you as Auditor. Request Student access below instead.'
                     : 'Claim vacant Auditor seat: Verify expenses, approve members, and edit expenses when authorized.'}
                 </div>
               </div>
@@ -2254,7 +2318,7 @@ export default function App() {
           </div>
 
           {/* Wait for Treasurer/Auditor Approval Gate: Students wait for approval; Officers only claim when no role was chosen */}
-          {!myRole && (!treasurerTakenByOther || !auditorTakenByOther) && (
+          {!myRole && canClaimOfficerSeat && (!treasurerTakenByOther || !auditorTakenByOther) && (
             <div className="p-4 rounded-xl border border-slate-200 space-y-2.5">
               <div className="text-xs font-semibold text-slate-800">
                 Officer Seat Available in This Room:
